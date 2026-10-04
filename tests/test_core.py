@@ -14,10 +14,10 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO))
 
-import core  # noqa: E402
-import enforce, sync_rules  # noqa: E402
+# Mirror the real loader: the plugin dir is imported as a package, never put on
+# sys.path. Keep the scrub so flat-import regressions cannot be masked here.
+sys.path[:] = [p for p in sys.path if Path(p or ".").resolve() != REPO.resolve()]
 
 
 def _load_plugin():
@@ -28,9 +28,17 @@ def _load_plugin():
     spec = importlib.util.spec_from_file_location(
         name, REPO / "__init__.py", submodule_search_locations=[str(REPO)])
     module = importlib.util.module_from_spec(spec)
+    module.__package__ = name
+    module.__path__ = [str(REPO)]
     sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
+
+
+_plugin = _load_plugin()
+core = _plugin.core
+enforce = _plugin.enforce
+sync_rules = _plugin.sync_rules
 
 
 @pytest.fixture()

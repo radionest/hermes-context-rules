@@ -15,9 +15,9 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import core
-import enforce as enforce_mod
-import sync_rules
+from . import core
+from . import enforce as enforce_mod
+from . import sync_rules
 
 logger = logging.getLogger(__name__)
 

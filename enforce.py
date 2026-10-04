@@ -9,8 +9,8 @@ import threading
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from core import Rule  # noqa: F401  (type annotation)
-import core
+from .core import Rule  # noqa: F401  (type annotation)
+from . import core
 
 ENFORCE_TIMEOUT_S = 120
 

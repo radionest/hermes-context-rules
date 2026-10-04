@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from core import GENERATED_MARKER, Rule, find_rule_roots, load_rules, session_cwd
+from .core import GENERATED_MARKER, Rule, find_rule_roots, load_rules, session_cwd
 
 
 def _name_to_filename(name: str) -> str:
