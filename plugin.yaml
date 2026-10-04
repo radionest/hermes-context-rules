@@ -1,0 +1,11 @@
+name: context-rules
+version: 0.1.0
+description: "Cursor/Claude-compatible conditional project rules: glob/auto/always modes from .cursor/rules/*.mdc and .claude/rules/*.md, with deterministic enforce gates."
+author: nest
+provides_middleware:
+  - tool_execution
+provides_hooks:
+  - post_tool_call
+  - pre_verify
+provides_commands:
+  - context-rules

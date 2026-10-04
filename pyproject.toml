@@ -1,0 +1,9 @@
+[project]
+name = "hermes-context-rules"
+version = "0.1.0"
+description = "Cursor/Claude-compatible conditional project rules plugin for Hermes Agent"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
