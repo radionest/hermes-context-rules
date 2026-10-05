@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional
 from . import core
 from . import enforce as enforce_mod
 from . import sync_rules
+from . import sync_from_claude
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +164,8 @@ def _handle_slash(raw_args: str) -> Optional[str]:
             return _cmd_show(" ".join(argv[1:]))
         if sub == "sync":
             return sync_rules.sync()
+        if sub == "sync-from-claude":
+            return sync_from_claude.handle(" ".join(argv[1:]))
         if sub == "verify":
             return _cmd_verify()
         return _HELP
@@ -176,6 +179,7 @@ _HELP = """/context-rules — conditional project rules (.cursor/rules, .claude/
   list              rule names only
   show <name>       full text of one rule
   sync              regenerate .claude/rules/*.md from .cursor/rules/*.mdc (Claude Code compat)
+  sync-from-claude  import handwritten .claude/rules/*.md into .cursor/rules/*.mdc (propose/apply)
   verify            run enforce gates now over files changed this turn
 """
 

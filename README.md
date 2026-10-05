@@ -74,6 +74,13 @@ counted twice.
 - `/context-rules list` — names only
 - `/context-rules show <name>` — full text of one rule
 - `/context-rules sync` — regenerate `.claude/rules/*.md`
+- `/context-rules sync-from-claude` — import handwritten `.claude/rules/*.md`
+  into `.cursor/rules/*.mdc` (the canon). Two phases: bare `sync-from-claude`
+  is a read-only plan (`ready` / `ask` / `conflict` / `imported` per rule);
+  `sync-from-claude apply <name> [always | glob <globs...> | desc <text...> |
+  manual] [--force] [--as <new-name>]` writes one `.mdc` with the body copied
+  verbatim. The source `.md` is kept — the next `sync` rewrites it as a
+  generated projection, so `.cursor` becomes the single source of truth.
 - `/context-rules verify` — explanation of how enforce gates run
 
 ## Installation
