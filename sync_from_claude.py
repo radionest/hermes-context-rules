@@ -214,9 +214,14 @@ def apply(base: Optional[Path], name: str, *args: str) -> str:
 
     if mode is None:
         if not item.has_meta:
-            return (f"Rule '{name}' has no frontmatter — a mode is required: "
-                    f"apply {name} always | glob <globs...> | desc <text...> | manual")
-        mode, _ = item._mode_from_meta()
+            # an identical-body canon may still allow the fix-up below
+            if item.target_exists() and item.target_body() == item.body.strip():
+                pass  # fall through to the fix-up gate
+            else:
+                return (f"Rule '{name}' has no frontmatter — a mode is required: "
+                        f"apply {name} always | glob <globs...> | desc <text...> | manual")
+        else:
+            mode, _ = item._mode_from_meta()
 
     target = item.target if rename is None else item.root / ".cursor" / "rules" / f"{rename}.mdc"
     target_existed = target.exists()
@@ -252,6 +257,10 @@ def apply(base: Optional[Path], name: str, *args: str) -> str:
             return f"[context-rules] failed to rewrite the source .md ({exc}); canon left unchanged."
         return f"[context-rules] {name}: canon unchanged; source .md rewritten as a projection: {src}"
 
+    if mode is None:
+        return (f"Rule '{name}' has no frontmatter — a mode is required: "
+                f"apply {name} always | glob <globs...> | desc <text...> | manual")
+
     front_lines: List[str] = []
     globs: List[str] = []
     if mode == "always":
@@ -266,7 +275,8 @@ def apply(base: Optional[Path], name: str, *args: str) -> str:
         front_lines.append("globs: [" + ", ".join(json.dumps(g) for g in globs) + "]")
     elif mode == "desc":
         if not rest:
-            desc = str(item.meta.get("description") or "").strip()
+            meta_desc = item.meta.get("description")
+            desc = meta_desc.strip() if isinstance(meta_desc, str) else ""
             if not desc:
                 return f"desc mode needs a description: apply {name} desc <text...>"
         else:
@@ -379,6 +389,6 @@ _HELP = """sync-from-claude — import handwritten .claude/rules/*.md into .curs
       --as      import under a new .mdc name (resolve a conflict by renaming)
       --root    pick the rule root when the same name exists in several roots
 
-Generated projections (marked files) are skipped: their canon already exists.
+Generated projections (marked files) are skipped when proposing imports.
 The source .md is rewritten as a generated projection of the new .mdc.
 """

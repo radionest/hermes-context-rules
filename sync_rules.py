@@ -99,9 +99,12 @@ def sync(explicit_cwd: Optional[str] = None) -> str:
                 continue
             by_file[fname] = relpath
             managed[relpath] = target
+        # track which canon rules actually hold their managed projection file
+        managed_written: Dict[str, bool] = {}
         for relpath, target in managed.items():
             rule = by_ref[relpath]
             content = projection_content(rule.relpath, rule.globs, rule.body, rule.mode)
+            written = False
             if target.exists():
                 try:
                     existing = target.read_text(encoding="utf-8-sig")
@@ -110,23 +113,30 @@ def sync(explicit_cwd: Optional[str] = None) -> str:
                 if existing != content:
                     # never overwrite a handwritten (unmarked) .claude rule —
                     # or any file we could not read (may be handwritten)
-                    if existing is None or GENERATED_MARKER not in existing:
-                        skipped.append(
-                            f"{target.name} (existing .claude rule with this name is handwritten or unreadable — "
-                            f"import or rename it via /context-rules sync-from-claude)")
-                        continue
-                    target.write_text(content, encoding="utf-8")
-                    updated.append(target.name)
+                    if existing is None or GENERATED_MARKER not in existing[:400]:
+                        reason = "unreadable (fix permissions, or delete it if it is a stale projection)" if existing is None \
+                            else "handwritten — import or rename it via /context-rules sync-from-claude"
+                        skipped.append(f"{target.name} (existing .claude rule with this name is {reason})")
+                    else:
+                        target.write_text(content, encoding="utf-8")
+                        updated.append(target.name)
+                        written = True
                 else:
                     kept.append(target.name)
+                    written = True
             else:
                 target.write_text(content, encoding="utf-8")
                 created.append(target.name)
+                written = True
+            managed_written[relpath] = written
 
         # prune: a generated file is stale only when its canon .mdc file is
         # GONE from disk (existence check, not parse success — an unparseable
         # canon keeps its projection), or when it duplicates the managed
-        # projection of the same canon (e.g. a pre-rename source)
+        # projection of the same canon AND that managed projection exists
+        # (if the managed name is occupied by a handwritten file, a marked
+        # projection elsewhere — e.g. a pre-rename source — is the canon's
+        # only projection and must be kept)
         canon_stems: Set[str] = set()
         cursor_dir = root / ".cursor" / "rules"
         if cursor_dir.is_dir():
@@ -135,7 +145,7 @@ def sync(explicit_cwd: Optional[str] = None) -> str:
             ref = _projection_ref(stale)
             if ref is not None:
                 gone = not (root / ref).exists()
-                duplicate = ref in managed and managed[ref] != stale
+                duplicate = ref in managed and managed[ref] != stale and managed_written.get(ref, False)
             else:
                 gone = stale.stem not in canon_stems
                 duplicate = False

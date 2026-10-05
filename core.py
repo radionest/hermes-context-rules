@@ -74,9 +74,11 @@ def _fallback_yaml(text: str) -> Dict[str, Any]:
             continue
         if stripped.startswith("- ") and current_list_key:
             item = _unquote(stripped[2:].strip())
-            values = data.setdefault(current_list_key, [])
-            if isinstance(values, list):
-                values.append(item)
+            values = data.get(current_list_key)
+            if not isinstance(values, list):
+                values = []
+                data[current_list_key] = values
+            values.append(item)
             continue
         if ":" not in stripped:
             continue
@@ -86,6 +88,7 @@ def _fallback_yaml(text: str) -> Dict[str, Any]:
         current_list_key = None
         if not value:
             data[key] = None
+            current_list_key = key  # a block list ("- item" lines) may follow
             continue
         if value.startswith("[") and value.endswith("]"):
             inner = value[1:-1].strip()

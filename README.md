@@ -61,12 +61,15 @@ between the two sources coexist as distinct rules (key = root|source|name).
 /context-rules sync
 ```
 
-Generates `.claude/rules/<name>.md` from each `.mdc`: frontmatter stripped,
-body plus a header line "apply when working with files matching <globs>".
-Claude Code loads them flat (it has no conditionality); Hermes loads them
-conditionally through this plugin. The roundtrip is safe: generated files
-carry a marker comment and are skipped when reading, so a rule is never
-counted twice.
+Generates `.claude/rules/<name>.md` from each `.mdc` (every mode): frontmatter
+stripped, body plus a header line noting when to apply ("apply when working
+with files matching <globs>" for glob rules; mode-appropriate notes
+otherwise). Claude Code loads them flat (it has no conditionality); Hermes
+loads them conditionally through this plugin. The roundtrip is safe:
+generated files carry a marker comment and are skipped when reading, so a
+rule is never counted twice. Handwritten (unmarked) `.claude/rules/*.md`
+files are never overwritten by sync — name collisions between the two
+sources coexist as distinct rules.
 
 ## Commands
 
