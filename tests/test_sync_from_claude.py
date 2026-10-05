@@ -388,3 +388,70 @@ def test_sync_prunes_orphan_projection_without_canon(tmp_path):
     out = sync_rules.sync(str(project))
     assert not (project / ".claude" / "rules" / "ghost.md").exists()
     assert "removed: ghost.md" in out
+
+
+def test_sync_never_overwrites_handwritten_claude_rule(tmp_path):
+    project = make_project(tmp_path)
+    mdc(project, "deploy", "alwaysApply: true", "Canon body.")
+    (project / ".claude" / "rules" / "deploy.md").write_text("Handwritten deploy wisdom.\n")
+    out = sync_rules.sync(str(project))
+    src = (project / ".claude" / "rules" / "deploy.md").read_text()
+    assert src == "Handwritten deploy wisdom.\n"  # untouched
+    assert "skipped" in out and "handwritten" in out
+    # both rules coexist as distinct rules (collisions coexist by design)
+    names = [(r.name, r.source) for r in core.load_rules(project)]
+    assert ("deploy", "cursor") in names and ("deploy", "claude") in names
+
+
+def test_sync_reports_slug_collision_instead_of_clobbering(tmp_path):
+    project = make_project(tmp_path)
+    mdc(project, "my rule", "globs: **/*.py", "Body one.")
+    mdc(project, "my-rule", "globs: **/*.py", "Body two.")
+    out = sync_rules.sync(str(project))
+    assert "collision" in out
+    # exactly one projection written; the collision is surfaced, not silent
+    projs = list((project / ".claude" / "rules").glob("*.md"))
+    assert len(projs) == 1
+
+
+def test_sync_keeps_projection_of_unparseable_canon(tmp_path):
+    project = make_project(tmp_path)
+    mdc(project, "py", "globs: **/*.py", "Body.")
+    sync_rules.sync(str(project))  # creates projection
+    # canon becomes unreadable (but still exists)
+    (project / ".cursor" / "rules" / "py.mdc").write_bytes(b"\xff\xfe\x00bad")
+    sync_rules.sync(str(project))
+    assert (project / ".claude" / "rules" / "py.md").exists()  # not pruned
+
+
+def test_apply_empty_body_canon_needs_force(tmp_path):
+    project = make_project(tmp_path)
+    mdc(project, "team", "alwaysApply: true", "")  # canon with empty body
+    claude_md(project, "team", "New body.\n")
+    out = sync_from_claude.apply(project, "team", "always")
+    assert "conflict" in out
+    assert "New body." not in (project / ".cursor" / "rules" / "team.mdc").read_text()
+
+
+def test_apply_explicit_mode_matching_canon_preserves_it(tmp_path):
+    project = make_project(tmp_path)
+    mdc(project, "py", "alwaysApply: true\nglobs: src/**/*.py", "Same body.")
+    claude_md(project, "py", "---\nalwaysApply: true\nglobs: src/**/*.py\n---\n\nSame body.\n")
+    out = sync_from_claude.apply(project, "py", "always")  # explicit mode == canon mode
+    assert "canon unchanged" in out
+    canon = (project / ".cursor" / "rules" / "py.mdc").read_text()
+    assert "globs: src/**/*.py" in canon  # canon keys preserved
+
+
+def test_fallback_parser_escaped_quote_in_flow_list(tmp_path):
+    project = make_project(tmp_path)
+    claude_md(project, "q", "Body.\n")
+    sync_from_claude.apply(project, "q", "glob", 'a"b.py', "plain.py")
+    text = (project / ".cursor" / "rules" / "q.mdc").read_text(encoding="utf-8-sig")
+    saved = core.yaml
+    core.yaml = None
+    try:
+        meta, _ = core._parse_frontmatter(text)
+        assert meta.get("globs") == ['a"b.py', "plain.py"], meta
+    finally:
+        core.yaml = saved

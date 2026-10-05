@@ -110,7 +110,7 @@ def _collect(base: Path) -> List[_Importable]:
             except (OSError, UnicodeDecodeError):
                 continue
             if GENERATED_MARKER in head:
-                continue  # our own sync projection; canon already exists
+                continue  # marked as a projection of some .mdc (kept even if that .mdc is missing; sync prunes orphans)
             try:
                 out.append(_Importable(f, root))
             except (OSError, UnicodeDecodeError):
@@ -219,9 +219,10 @@ def apply(base: Optional[Path], name: str, *args: str) -> str:
         mode, _ = item._mode_from_meta()
 
     target = item.target if rename is None else item.root / ".cursor" / "rules" / f"{rename}.mdc"
+    target_existed = target.exists()
     existing_body: Optional[str] = None
     canon_meta: Dict[str, object] = {}
-    if target.exists():
+    if target_existed:
         try:
             text = target.read_text(encoding="utf-8-sig")
         except (OSError, UnicodeDecodeError):
@@ -230,19 +231,25 @@ def apply(base: Optional[Path], name: str, *args: str) -> str:
             canon_meta, body = _parse_frontmatter(text)
             existing_body = body.strip() or None
 
-    # 'imported' fix-up: identical body and no explicit mode/args — the canon
-    # already holds this rule; only rewrite the source .md as its projection,
-    # deriving everything from the authoritative .mdc.
-    if (existing_body == item.body.strip() and not mode_given and not rest
-            and rename is None and not force):
+    # 'imported' fix-up: identical body and no conflicting arguments — the
+    # canon already holds this rule; only rewrite the source .md as its
+    # projection, deriving everything from the authoritative .mdc. An
+    # explicit mode equal to the canon's resolved mode is not a conflict.
+    body_identical = existing_body is not None and existing_body == item.body.strip()
+    mode_matches = not mode_given or (existing_body is not None and mode == _mode_of_meta(canon_meta))
+    if (body_identical and mode_matches and not rest and rename is None
+            and (not force or not mode_given)):
         proj_mode = _mode_of_meta(canon_meta)
         proj_globs = _as_glob_list(canon_meta.get("globs"))
         src = item.path.relative_to(item.root).as_posix()
-        item.path.write_text(
-            projection_content(target.relative_to(item.root).as_posix(), proj_globs,
-                               item.body.strip(), proj_mode),
-            encoding="utf-8",
-        )
+        try:
+            item.path.write_text(
+                projection_content(target.relative_to(item.root).as_posix(), proj_globs,
+                                   item.body.strip(), proj_mode),
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            return f"[context-rules] failed to rewrite the source .md ({exc}); canon left unchanged."
         return f"[context-rules] {name}: canon unchanged; source .md rewritten as a projection: {src}"
 
     front_lines: List[str] = []
@@ -266,6 +273,7 @@ def apply(base: Optional[Path], name: str, *args: str) -> str:
             desc = " ".join(rest)
         front_lines.append(f"description: {json.dumps(desc)}")
     else:  # manual
+        # explicit override of an alwaysApply source: record the flip
         if item.meta.get("alwaysApply") is True:
             front_lines.append("alwaysApply: false")
 
@@ -294,7 +302,7 @@ def apply(base: Optional[Path], name: str, *args: str) -> str:
     for key, value in carry.items():
         _emit(front_lines, key, value)
 
-    if existing_body is not None and existing_body != item.body.strip() and not force:
+    if target_existed and existing_body != item.body.strip() and not force:
         return (f"conflict: {target.relative_to(item.root).as_posix()} exists with a different body — "
                 f"re-run with --force to overwrite or --as <new-name> to import under a new name")
 
@@ -303,11 +311,11 @@ def apply(base: Optional[Path], name: str, *args: str) -> str:
     content = "---\n" + "\n".join(front_lines) + "\n---\n\n" + item.body.strip() + "\n"
     target.parent.mkdir(parents=True, exist_ok=True)
     original_bytes: Optional[bytes] = None
-    if target.exists():
+    if target_existed:
         try:
             original_bytes = target.read_bytes()
         except OSError:
-            original_bytes = None
+            original_bytes = None  # unreadable pre-existing canon: keep it, never unlink
     target.write_text(content, encoding="utf-8")
 
     # Rewrite the source .md as a marked projection of the new .mdc: the canon
@@ -320,11 +328,23 @@ def apply(base: Optional[Path], name: str, *args: str) -> str:
             encoding="utf-8",
         )
     except OSError as exc:
-        if original_bytes is not None:
-            target.write_bytes(original_bytes)
+        rollback_failed = False
+        try:
+            if original_bytes is not None:
+                target.write_bytes(original_bytes)
+            elif not target_existed:
+                target.unlink(missing_ok=True)
+        except OSError:
+            rollback_failed = True
+        if rollback_failed:
+            status = "canon rollback failed — inspect it manually"
+        elif original_bytes is not None:
+            status = "canon restored"
+        elif target_existed:
+            status = "pre-existing canon left as written (it was unreadable before the import)"
         else:
-            target.unlink(missing_ok=True)
-        return f"[context-rules] import failed while rewriting the source .md ({exc}); canon left unchanged."
+            status = "new canon removed"
+        return (f"[context-rules] import failed while rewriting the source .md ({exc}); {status}.")
 
     where = target.relative_to(item.root).as_posix()
     src = item.path.relative_to(item.root).as_posix()
@@ -339,7 +359,7 @@ def _cwd() -> Path:
 
 
 def handle(raw_args: str) -> str:
-    """Slash-command entry point: ``sync-from-claude [apply <name> [mode...] [--force] [--as <n>]]``."""
+    """Slash-command entry point: ``sync-from-claude [apply <name> [mode...] [--force] [--as <n>] [--root <dir>]]``."""
     argv = (raw_args or "").strip().split()
     if not argv or argv[0] == "propose":
         return propose()

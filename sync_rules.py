@@ -52,7 +52,7 @@ def projection_content(relpath: str, globs: List[str], body: str, mode: str = "g
 _PROJECTION_SRC_RE = re.compile(re.escape(GENERATED_MARKER) + r" from (.*?) — do not edit")
 
 
-def _projection_ref(root: Path, proj: Path) -> Optional[str]:
+def _projection_ref(proj: Path) -> Optional[str]:
     """The canon relpath a projection's header references, if parsable."""
     try:
         head = proj.read_text(encoding="utf-8-sig")[:400]
@@ -66,31 +66,41 @@ def sync(explicit_cwd: Optional[str] = None) -> str:
     """Materialize cursor rules as flat Claude Code rules; report what happened.
 
     Every cursor rule mode gets a projection (always/manual included), so a
-    projection written by sync-from-claude stays refreshed, and .claude/rules
-    converges to exactly one projection per canonical .mdc.
+    projection written by sync-from-claude stays refreshed. A handwritten
+    (unmarked) .claude/rules file is never overwritten — name collisions
+    between the two sources coexist as distinct rules by design.
     """
     base = session_cwd(explicit_cwd)
     roots = find_rule_roots(base)
     if not roots:
         return "No rule roots found (looked for .cursor/rules and .claude/rules from cwd to git root)."
 
-    created, updated, removed, kept = [], [], [], []
+    created, updated, removed, kept, skipped = [], [], [], [], []
     rules = load_rules(base)
     cursor_rules = [r for r in rules if r.source == "cursor"]
 
     for root in roots:
         target_dir = claude_rules_dir(root)
         target_dir.mkdir(parents=True, exist_ok=True)
-        # one managed projection per canonical .mdc, keyed by the file it projects
-        managed: Dict[str, Path] = {}  # canon relpath -> projection path
         by_ref: Dict[str, Rule] = {}
         for rule in cursor_rules:
             if rule.root != root:
                 continue
             by_ref[rule.relpath] = rule
-        for relpath, rule in by_ref.items():
-            target = target_dir / f"{_name_to_filename(rule.name)}.md"
+        # one managed projection per canonical .mdc, keyed by the file it
+        # projects; slug collisions are reported, not silently clobbered
+        managed: Dict[str, Path] = {}  # canon relpath -> projection path
+        by_file: Dict[str, str] = {}   # projection filename -> canon relpath
+        for relpath in by_ref:
+            target = target_dir / f"{_name_to_filename(by_ref[relpath].name)}.md"
+            fname = target.name
+            if fname in by_file:
+                skipped.append(f"{fname} (name collision between {by_file[fname]} and {relpath})")
+                continue
+            by_file[fname] = relpath
             managed[relpath] = target
+        for relpath, target in managed.items():
+            rule = by_ref[relpath]
             content = projection_content(rule.relpath, rule.globs, rule.body, rule.mode)
             if target.exists():
                 try:
@@ -98,6 +108,12 @@ def sync(explicit_cwd: Optional[str] = None) -> str:
                 except (OSError, UnicodeDecodeError):
                     existing = None
                 if existing != content:
+                    # never overwrite a handwritten (unmarked) .claude rule
+                    if existing is not None and GENERATED_MARKER not in existing:
+                        skipped.append(
+                            f"{target.name} (handwritten .claude rule with this name exists — "
+                            f"import or rename it via /context-rules sync-from-claude)")
+                        continue
                     target.write_text(content, encoding="utf-8")
                     updated.append(target.name)
                 else:
@@ -106,18 +122,18 @@ def sync(explicit_cwd: Optional[str] = None) -> str:
                 target.write_text(content, encoding="utf-8")
                 created.append(target.name)
 
-        # prune: a generated file is stale when its canon .mdc is gone (header
-        # reference when parsable, else stem membership), or when it is a
-        # duplicate projection of a canon rule already projected under the
-        # managed name (e.g. the pre-rename source left by sync-from-claude)
+        # prune: a generated file is stale only when its canon .mdc file is
+        # GONE from disk (existence check, not parse success — an unparseable
+        # canon keeps its projection), or when it duplicates the managed
+        # projection of the same canon (e.g. a pre-rename source)
         canon_stems: Set[str] = set()
         cursor_dir = root / ".cursor" / "rules"
         if cursor_dir.is_dir():
             canon_stems = {p.stem for p in cursor_dir.glob("*.mdc")}
         for stale in generated_files(root):
-            ref = _projection_ref(root, stale)
+            ref = _projection_ref(stale)
             if ref is not None:
-                gone = ref not in by_ref
+                gone = not (root / ref).exists()
                 duplicate = ref in managed and managed[ref] != stale
             else:
                 gone = stale.stem not in canon_stems
@@ -130,4 +146,7 @@ def sync(explicit_cwd: Optional[str] = None) -> str:
     for label, items in (("created", created), ("updated", updated), ("removed", removed), ("unchanged", kept)):
         if items:
             lines.append(f"  {label}: {', '.join(items)}")
+    if skipped:
+        lines.append("  skipped (needs attention):")
+        lines.extend(f"    - {s}" for s in skipped)
     return "\n".join(lines)

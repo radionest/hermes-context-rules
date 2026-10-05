@@ -134,14 +134,29 @@ def _decode_dq(inner: str) -> str:
 
 
 def _split_flow_items(inner: str) -> List[str]:
-    """Split a flow-sequence body on commas that are not inside quotes."""
+    """Split a flow-sequence body on commas that are not inside quotes.
+
+    Backslash escapes are honored inside double quotes (YAML double-quoted
+    scalars), so an escaped quote does not close the string.
+    """
     items: List[str] = []
     buf: List[str] = []
     quote: Optional[str] = None
-    for ch in inner:
-        if quote is not None:
+    i = 0
+    while i < len(inner):
+        ch = inner[i]
+        if quote == '"':
+            if ch == "\\" and i + 1 < len(inner):
+                buf.append(ch)
+                buf.append(inner[i + 1])
+                i += 2
+                continue
             buf.append(ch)
-            if ch == quote:
+            if ch == '"':
+                quote = None
+        elif quote == "'":
+            buf.append(ch)
+            if ch == "'":
                 quote = None
         elif ch in ("'", '"'):
             quote = ch
@@ -151,6 +166,7 @@ def _split_flow_items(inner: str) -> List[str]:
             buf = []
         else:
             buf.append(ch)
+        i += 1
     tail = "".join(buf).strip()
     if tail or items:
         items.append(tail)
