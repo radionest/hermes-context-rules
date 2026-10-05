@@ -89,7 +89,7 @@ def _fallback_yaml(text: str) -> Dict[str, Any]:
             continue
         if value.startswith("[") and value.endswith("]"):
             inner = value[1:-1].strip()
-            data[key] = [_unquote(v.strip()) for v in inner.split(",") if v.strip()] if inner else []
+            data[key] = [_unquote(v) for v in _split_flow_items(inner)] if inner else []
             continue
         if value in ("true", "True"):
             data[key] = True
@@ -106,9 +106,63 @@ def _fallback_yaml(text: str) -> Dict[str, Any]:
     return data
 
 
+_DQ_ESCAPES = {'"': '"', "\\": "\\", "/": "/", "n": "\n", "t": "\t",
+               "r": "\r", "b": "\b", "f": "\f", "0": "\0"}
+
+
+def _decode_dq(inner: str) -> str:
+    """Decode YAML double-quoted escapes (the json.dumps subset we write)."""
+    out: List[str] = []
+    i = 0
+    while i < len(inner):
+        ch = inner[i]
+        if ch == "\\" and i + 1 < len(inner):
+            nxt = inner[i + 1]
+            if nxt == "u" and i + 6 <= len(inner):
+                try:
+                    out.append(chr(int(inner[i + 2 : i + 6], 16)))
+                    i += 6
+                    continue
+                except ValueError:
+                    pass
+            out.append(_DQ_ESCAPES.get(nxt, nxt))
+            i += 2
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _split_flow_items(inner: str) -> List[str]:
+    """Split a flow-sequence body on commas that are not inside quotes."""
+    items: List[str] = []
+    buf: List[str] = []
+    quote: Optional[str] = None
+    for ch in inner:
+        if quote is not None:
+            buf.append(ch)
+            if ch == quote:
+                quote = None
+        elif ch in ("'", '"'):
+            quote = ch
+            buf.append(ch)
+        elif ch == ",":
+            items.append("".join(buf).strip())
+            buf = []
+        else:
+            buf.append(ch)
+    tail = "".join(buf).strip()
+    if tail or items:
+        items.append(tail)
+    return [it for it in items if it]
+
+
 def _unquote(value: str) -> str:
     if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
-        return value[1:-1]
+        inner = value[1:-1]
+        if value[0] == '"':
+            return _decode_dq(inner)
+        return inner.replace("''", "'")
     return value
 
 

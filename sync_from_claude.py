@@ -4,7 +4,7 @@ into the canonical .cursor/rules/*.mdc format.
 Two phases, no in-band interactivity (works on every surface):
 - ``propose`` — read-only plan. Per rule: ready | ask | conflict | imported.
 - ``apply``   — write one .mdc (body verbatim). Unknowns come in as arguments:
-  ``apply <name> [always | glob <globs...> | desc <text...> | manual] [--force] [--as <new>]``.
+  ``apply <name> [always | glob <globs...> | desc <text...> | manual] [--force] [--as <new>] [--root <dir>]``.
   The agent running the command asks the user the ``ask``/``conflict`` questions
   out of band and then calls apply with the answers.
 
@@ -23,6 +23,8 @@ from .core import GENERATED_MARKER, _as_glob_list, _parse_frontmatter, find_rule
 from .sync_rules import projection_content
 
 _MODES = ("always", "glob", "desc", "manual")
+# keys that carry mode semantics; everything else is opaque carry-over
+_MODE_KEYS = ("alwaysApply", "globs", "description")
 
 
 class _Importable:
@@ -52,6 +54,15 @@ class _Importable:
             return None
         return body.strip()
 
+    def target_meta(self) -> Dict[str, object]:
+        if not self.target.exists():
+            return {}
+        try:
+            meta, _ = _parse_frontmatter(self.target.read_text(encoding="utf-8-sig"))
+        except (OSError, UnicodeDecodeError):
+            return {}
+        return meta
+
     def status(self) -> Tuple[str, str]:
         """(status, one-line detail) — ready | ask | conflict | imported."""
         if self.target_exists():
@@ -74,6 +85,17 @@ class _Importable:
         if desc:
             return "desc", f"description: {desc}"
         return "manual", "frontmatter present, no mode markers -> manual"
+
+
+def _mode_of_meta(meta: Dict[str, object]) -> str:
+    """Resolve a mode from frontmatter markers (no claude-source default)."""
+    if meta.get("alwaysApply") is True:
+        return "always"
+    if _as_glob_list(meta.get("globs")):
+        return "glob"
+    if str(meta.get("description") or "").strip():
+        return "desc"
+    return "manual"
 
 
 def _collect(base: Path) -> List[_Importable]:
@@ -103,8 +125,17 @@ def propose(explicit: Optional[Path] = None) -> str:
     if not items:
         return "No importable .claude/rules/*.md found (generated projections and files already in the canon are skipped)."
     by_status: Dict[str, List[Tuple[_Importable, str]]] = {}
+    name_counts: Dict[str, int] = {}
+    for item in items:
+        name_counts[item.name] = name_counts.get(item.name, 0) + 1
     for item in items:
         status, detail = item.status()
+        if name_counts[item.name] > 1:
+            try:
+                root_label = item.root.relative_to(base).as_posix()
+            except ValueError:
+                root_label = item.root.as_posix()
+            detail += f" [root: {root_label} — disambiguate with --root]"
         by_status.setdefault(status, []).append((item, detail))
     lines = [f"sync-from-claude propose: {len(items)} importable rule(s) for {base}"]
     for status in ("ready", "ask", "conflict", "imported"):
@@ -112,9 +143,27 @@ def propose(explicit: Optional[Path] = None) -> str:
             lines.append(f"  [{status:>8}] {item.name}  ({item.path.relative_to(item.root).as_posix()})")
             lines.append(f"            {detail}")
     lines.append(
-        "apply with: /context-rules sync-from-claude apply <name> [always | glob <globs...> | desc <text...> | manual] [--force] [--as <new-name>]"
+        "apply with: /context-rules sync-from-claude apply <name> [always | glob <globs...> | desc <text...> | manual] [--force] [--as <new-name>] [--root <dir>]"
     )
     return "\n".join(lines)
+
+
+def _emit(front_lines: List[str], key: str, value: object) -> None:
+    if isinstance(value, bool):
+        front_lines.append(f"{key}: {str(value).lower()}")
+    elif isinstance(value, str):
+        front_lines.append(f"{key}: {json.dumps(value)}")
+    elif value is None:
+        return  # never stringify a null into the canon
+    else:
+        front_lines.append(f"{key}: {value}")
+
+
+def _carryable(mode: str, key: str) -> bool:
+    """May *key* ride along without flipping the chosen mode's resolution?"""
+    if key in _MODE_KEYS:
+        return False
+    return True
 
 
 def apply(base: Optional[Path], name: str, *args: str) -> str:
@@ -124,6 +173,7 @@ def apply(base: Optional[Path], name: str, *args: str) -> str:
     rest: List[str] = []
     force = False
     rename: Optional[str] = None
+    root_sel: Optional[str] = None
     it = iter(args)
     for tok in it:
         if tok == "--force":
@@ -132,15 +182,32 @@ def apply(base: Optional[Path], name: str, *args: str) -> str:
             rename = next(it, None)
             if rename is None:
                 return "usage: --as needs a value: apply <name> [mode...] [--as <new-name>]"
+        elif tok == "--root":
+            root_sel = next(it, None)
+            if root_sel is None:
+                return "usage: --root needs a value: apply <name> [mode...] [--root <dir>]"
         elif mode is None and tok in _MODES:
             mode = tok
         else:
             rest.append(tok)
     if rename is not None and (not rename.strip() or "/" in rename or rename.strip() != rename or rename.startswith("-")):
         return f"[context-rules] invalid --as name: {rename!r}"
+    mode_given = mode is not None
 
-    items = {i.name: i for i in _collect(root_dir)}
-    item = items.get(name)
+    matches = [i for i in _collect(root_dir) if i.name == name]
+    if root_sel is not None:
+        sel = Path(root_sel).expanduser()
+        if not sel.is_absolute():
+            sel = root_dir / sel
+        sel = sel.resolve()
+        matches = [i for i in matches if i.root == sel]
+        if not matches:
+            return (f"No importable rule named '{name}' under root {sel} "
+                    f"(see /context-rules sync-from-claude propose).")
+    if len(matches) > 1:
+        roots = "\n".join(f"  --root {i.root}" for i in matches)
+        return (f"Rule name '{name}' exists in {len(matches)} rule roots — disambiguate:\n{roots}")
+    item = matches[0] if matches else None
     if item is None:
         return (f"No importable rule named '{name}' (see /context-rules sync-from-claude propose; "
                 f"generated projections are skipped).")
@@ -150,6 +217,33 @@ def apply(base: Optional[Path], name: str, *args: str) -> str:
             return (f"Rule '{name}' has no frontmatter — a mode is required: "
                     f"apply {name} always | glob <globs...> | desc <text...> | manual")
         mode, _ = item._mode_from_meta()
+
+    target = item.target if rename is None else item.root / ".cursor" / "rules" / f"{rename}.mdc"
+    existing_body: Optional[str] = None
+    canon_meta: Dict[str, object] = {}
+    if target.exists():
+        try:
+            text = target.read_text(encoding="utf-8-sig")
+        except (OSError, UnicodeDecodeError):
+            text = None
+        if text is not None:
+            canon_meta, body = _parse_frontmatter(text)
+            existing_body = body.strip() or None
+
+    # 'imported' fix-up: identical body and no explicit mode/args — the canon
+    # already holds this rule; only rewrite the source .md as its projection,
+    # deriving everything from the authoritative .mdc.
+    if (existing_body == item.body.strip() and not mode_given and not rest
+            and rename is None and not force):
+        proj_mode = _mode_of_meta(canon_meta)
+        proj_globs = _as_glob_list(canon_meta.get("globs"))
+        src = item.path.relative_to(item.root).as_posix()
+        item.path.write_text(
+            projection_content(target.relative_to(item.root).as_posix(), proj_globs,
+                               item.body.strip(), proj_mode),
+            encoding="utf-8",
+        )
+        return f"[context-rules] {name}: canon unchanged; source .md rewritten as a projection: {src}"
 
     front_lines: List[str] = []
     globs: List[str] = []
@@ -174,39 +268,63 @@ def apply(base: Optional[Path], name: str, *args: str) -> str:
     else:  # manual
         if item.meta.get("alwaysApply") is True:
             front_lines.append("alwaysApply: false")
-    # carry over non-mode keys from the source frontmatter (e.g. enforce)
-    for key, value in item.meta.items():
-        if key in ("alwaysApply", "globs", "description"):
-            continue
-        if isinstance(value, bool):
-            front_lines.append(f"{key}: {str(value).lower()}")
-        elif isinstance(value, str):
-            front_lines.append(f"{key}: {json.dumps(value)}")
-        else:
-            front_lines.append(f"{key}: {value}")
 
-    target = item.target if rename is None else item.root / ".cursor" / "rules" / f"{rename}.mdc"
-    if target.exists() and not force:
-        try:
-            _, existing_body = _parse_frontmatter(target.read_text(encoding="utf-8-sig"))
-        except (OSError, UnicodeDecodeError):
-            existing_body = None
-        if (existing_body or "").strip() != item.body.strip():
-            return (f"conflict: {target.relative_to(item.root).as_posix()} exists with a different body — "
-                    f"re-run with --force to overwrite or --as <new-name> to import under a new name")
+    # Carry over metadata without changing the chosen mode's resolution.
+    # mode keys: only the ones emitted above; always-mode keeps source globs
+    # (inert under alwaysApply: true, preserved for a later flip); desc-mode
+    # drops globs (they would win over description on re-read); manual takes
+    # no mode keys at all. Canon-only keys survive a rebuild (--force).
+    carry: Dict[str, object] = {}
+    for key, value in item.meta.items():
+        if not _carryable(mode, key) or value is None or key in carry:
+            continue
+        if mode == "desc" and key == "globs":
+            continue
+        carry[key] = value
+    if mode == "always" and "globs" not in carry:
+        src_globs = item.meta.get("globs")
+        if src_globs is not None:
+            carry["globs"] = src_globs
+    for key, value in canon_meta.items():
+        if key in item.meta or not _carryable(mode, key) or value is None or key in carry:
+            continue
+        if mode == "desc" and key == "globs":
+            continue
+        carry[key] = value
+    for key, value in carry.items():
+        _emit(front_lines, key, value)
+
+    if existing_body is not None and existing_body != item.body.strip() and not force:
+        return (f"conflict: {target.relative_to(item.root).as_posix()} exists with a different body — "
+                f"re-run with --force to overwrite or --as <new-name> to import under a new name")
 
     if not item.body.strip():
         return f"Rule '{name}' has an empty body — nothing to import."
     content = "---\n" + "\n".join(front_lines) + "\n---\n\n" + item.body.strip() + "\n"
     target.parent.mkdir(parents=True, exist_ok=True)
+    original_bytes: Optional[bytes] = None
+    if target.exists():
+        try:
+            original_bytes = target.read_bytes()
+        except OSError:
+            original_bytes = None
     target.write_text(content, encoding="utf-8")
 
     # Rewrite the source .md as a marked projection of the new .mdc: the canon
-    # is authoritative now and the rule must never be counted twice.
-    item.path.write_text(
-        projection_content(target.relative_to(item.root).as_posix(), globs, item.body.strip()),
-        encoding="utf-8",
-    )
+    # is authoritative now and the rule must never be counted twice. If this
+    # second write fails, roll the canon back so no half-imported state stays.
+    try:
+        item.path.write_text(
+            projection_content(target.relative_to(item.root).as_posix(),
+                               globs if mode == "glob" else [], item.body.strip(), mode),
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        if original_bytes is not None:
+            target.write_bytes(original_bytes)
+        else:
+            target.unlink(missing_ok=True)
+        return f"[context-rules] import failed while rewriting the source .md ({exc}); canon left unchanged."
 
     where = target.relative_to(item.root).as_posix()
     src = item.path.relative_to(item.root).as_posix()
@@ -227,7 +345,7 @@ def handle(raw_args: str) -> str:
         return propose()
     if argv[0] == "apply":
         if len(argv) < 2:
-            return "usage: /context-rules sync-from-claude apply <name> [always | glob <globs...> | desc <text...> | manual] [--force] [--as <new-name>]"
+            return "usage: /context-rules sync-from-claude apply <name> [always | glob <globs...> | desc <text...> | manual] [--force] [--as <new-name>] [--root <dir>]"
         return apply(None, argv[1], *argv[2:])
     return _HELP
 
@@ -235,10 +353,11 @@ def handle(raw_args: str) -> str:
 _HELP = """sync-from-claude — import handwritten .claude/rules/*.md into .cursor/rules/*.mdc (the canon)
 
   sync-from-claude                propose: read-only plan (ready | ask | conflict | imported)
-  sync-from-claude apply <name> [mode] [--force] [--as <new-name>]
+  sync-from-claude apply <name> [mode] [--force] [--as <new-name>] [--root <dir>]
       mode: always | glob <globs...> | desc <text...> | manual
       --force   overwrite an existing .mdc with a different body
       --as      import under a new .mdc name (resolve a conflict by renaming)
+      --root    pick the rule root when the same name exists in several roots
 
 Generated projections (marked files) are skipped: their canon already exists.
 The source .md is rewritten as a generated projection of the new .mdc.

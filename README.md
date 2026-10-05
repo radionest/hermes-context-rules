@@ -78,9 +78,9 @@ counted twice.
   into `.cursor/rules/*.mdc` (the canon). Two phases: bare `sync-from-claude`
   is a read-only plan (`ready` / `ask` / `conflict` / `imported` per rule);
   `sync-from-claude apply <name> [always | glob <globs...> | desc <text...> |
-  `manual] [--force] [--as <new-name>]` writes one `.mdc` with the body copied
-  verbatim and rewrites the source `.md` in place as a generated projection,
-  so `.cursor` becomes the single source of truth.
+  manual] [--force] [--as <new-name>] [--root <dir>]` writes one `.mdc` with
+  the body copied verbatim and rewrites the source `.md` in place as a
+  generated projection, so `.cursor` becomes the single source of truth.
 - `/context-rules verify` — explanation of how enforce gates run
 
 ## Installation
