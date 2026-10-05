@@ -239,5 +239,5 @@ def register(ctx) -> None:
         logger.debug("system prompt section unavailable", exc_info=True)
     ctx.register_command(
         "context-rules", handler=_handle_slash,
-        description="Conditional project rules (.cursor/rules, .claude/rules): status, show, sync, verify.",
+        description="Conditional project rules (.cursor/rules, .claude/rules): status, show, sync, sync-from-claude, verify.",
     )

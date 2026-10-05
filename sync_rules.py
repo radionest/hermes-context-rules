@@ -33,6 +33,37 @@ def generated_files(root: Path) -> List[Path]:
     return out
 
 
+def projection_content(relpath: str, globs: List[str], body: str) -> str:
+    """The marked .claude/rules/*.md projection of a canonical .mdc."""
+    header = f"{GENERATED_MARKER} from {relpath} — do not edit here; edit the .mdc. -->"
+    glob_note = (
+        f"Apply when working with files matching: {', '.join(globs)}."
+        if globs
+        else "Apply when relevant."
+    )
+    return f"{header}\n\n{glob_note}\n\n{body}\n"
+
+
+_PROJECTION_SRC_RE = re.compile(re.escape(GENERATED_MARKER) + r" from (.*?) — do not edit")
+
+
+def _projection_is_stale(root: Path, proj: Path, canon_stems: set) -> bool:
+    """A projection is stale when the .mdc it references no longer exists.
+
+    The header carries the canon relpath (survives sync-from-claude renames,
+    where the projection stem differs from the .mdc stem); fall back to a
+    stem match for projections without a parsable source reference.
+    """
+    try:
+        head = proj.read_text(encoding="utf-8-sig")[:400]
+    except (OSError, UnicodeDecodeError):
+        return False  # unreadable: leave it alone
+    m = _PROJECTION_SRC_RE.search(head)
+    if m:
+        return not (root / m.group(1)).exists()
+    return proj.stem not in canon_stems
+
+
 def sync(explicit_cwd: Optional[str] = None) -> str:
     """Materialize glob/desc rules as flat Claude Code rules; report what happened."""
     base = session_cwd(explicit_cwd)
@@ -53,13 +84,7 @@ def sync(explicit_cwd: Optional[str] = None) -> str:
                 continue
             target = target_dir / f"{_name_to_filename(rule.name)}.md"
             wanted[target.name] = target
-            header = f"{GENERATED_MARKER} from {rule.relpath} — do not edit here; edit the .mdc. -->"
-            glob_note = (
-                f"Apply when working with files matching: {', '.join(rule.globs)}."
-                if rule.globs
-                else "Apply when relevant."
-            )
-            content = f"{header}\n\n{glob_note}\n\n{rule.body}\n"
+            content = projection_content(rule.relpath, rule.globs, rule.body)
             if target.exists():
                 try:
                     existing = target.read_text(encoding="utf-8-sig")
@@ -74,9 +99,12 @@ def sync(explicit_cwd: Optional[str] = None) -> str:
                 target.write_text(content, encoding="utf-8")
                 created.append(target.name)
 
-        # drop generated files whose .mdc disappeared
+        # drop generated projections whose canon .mdc disappeared (any mode:
+        # sync-from-claude marks the source .md of every imported rule)
+        canon_stems = {p.stem for p in (root / ".cursor" / "rules").glob("*.mdc")} \
+            if (root / ".cursor" / "rules").is_dir() else set()
         for stale in generated_files(root):
-            if stale.name not in wanted:
+            if _projection_is_stale(root, stale, canon_stems):
                 stale.unlink()
                 removed.append(stale.name)
 

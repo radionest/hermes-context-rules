@@ -8,17 +8,19 @@ Two phases, no in-band interactivity (works on every surface):
   The agent running the command asks the user the ``ask``/``conflict`` questions
   out of band and then calls apply with the answers.
 
-The source .md is left in place; the next ``sync`` rewrites it as a generated
-projection (GENERATED_MARKER), closing the loop: .cursor is the single source
-of truth, .claude holds projections only.
+The source .md is rewritten in place as a generated projection
+(GENERATED_MARKER) of the new .mdc, closing the loop immediately: .cursor is
+the single source of truth, .claude holds projections only.
 """
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from .core import GENERATED_MARKER, _as_glob_list, _parse_frontmatter, find_rule_roots
+from .sync_rules import projection_content
 
 _MODES = ("always", "glob", "desc", "manual")
 
@@ -44,14 +46,17 @@ class _Importable:
     def target_body(self) -> Optional[str]:
         if not self.target.exists():
             return None
-        _, body = _parse_frontmatter(self.target.read_text(encoding="utf-8-sig"))
+        try:
+            _, body = _parse_frontmatter(self.target.read_text(encoding="utf-8-sig"))
+        except (OSError, UnicodeDecodeError):
+            return None
         return body.strip()
 
     def status(self) -> Tuple[str, str]:
         """(status, one-line detail) — ready | ask | conflict | imported."""
         if self.target_exists():
             if self.target_body() == self.body.strip():
-                return "imported", "identical .mdc exists — run /context-rules sync to project it"
+                return "imported", "identical .mdc exists — re-run apply to rewrite the source .md as a projection"
             return "conflict", f".cursor/rules/{self.name}.mdc exists with a different body (use --force to overwrite, --as to rename)"
         if not self.has_meta:
             unknowns = ["mode (always | glob <globs...> | desc <text...> | manual)"]
@@ -125,11 +130,13 @@ def apply(base: Optional[Path], name: str, *args: str) -> str:
             force = True
         elif tok == "--as":
             rename = next(it, None)
+            if rename is None:
+                return "usage: --as needs a value: apply <name> [mode...] [--as <new-name>]"
         elif mode is None and tok in _MODES:
             mode = tok
         else:
             rest.append(tok)
-    if rename is not None and (not rename.strip() or "/" in rename or rename.strip() != rename):
+    if rename is not None and (not rename.strip() or "/" in rename or rename.strip() != rename or rename.startswith("-")):
         return f"[context-rules] invalid --as name: {rename!r}"
 
     items = {i.name: i for i in _collect(root_dir)}
@@ -145,6 +152,7 @@ def apply(base: Optional[Path], name: str, *args: str) -> str:
         mode, _ = item._mode_from_meta()
 
     front_lines: List[str] = []
+    globs: List[str] = []
     if mode == "always":
         front_lines.append("alwaysApply: true")
     elif mode == "glob":
@@ -153,8 +161,8 @@ def apply(base: Optional[Path], name: str, *args: str) -> str:
             if not globs:
                 return f"glob mode needs globs: apply {name} glob <globs...>"
         else:
-            globs = rest
-        front_lines.append("globs: [" + ", ".join(f'"{g}"' for g in globs) + "]")
+            globs = list(rest)
+        front_lines.append("globs: [" + ", ".join(json.dumps(g) for g in globs) + "]")
     elif mode == "desc":
         if not rest:
             desc = str(item.meta.get("description") or "").strip()
@@ -162,14 +170,27 @@ def apply(base: Optional[Path], name: str, *args: str) -> str:
                 return f"desc mode needs a description: apply {name} desc <text...>"
         else:
             desc = " ".join(rest)
-        front_lines.append(f"description: {desc}")
+        front_lines.append(f"description: {json.dumps(desc)}")
     else:  # manual
         if item.meta.get("alwaysApply") is True:
             front_lines.append("alwaysApply: false")
+    # carry over non-mode keys from the source frontmatter (e.g. enforce)
+    for key, value in item.meta.items():
+        if key in ("alwaysApply", "globs", "description"):
+            continue
+        if isinstance(value, bool):
+            front_lines.append(f"{key}: {str(value).lower()}")
+        elif isinstance(value, str):
+            front_lines.append(f"{key}: {json.dumps(value)}")
+        else:
+            front_lines.append(f"{key}: {value}")
 
     target = item.target if rename is None else item.root / ".cursor" / "rules" / f"{rename}.mdc"
     if target.exists() and not force:
-        _, existing_body = _parse_frontmatter(target.read_text(encoding="utf-8-sig"))
+        try:
+            _, existing_body = _parse_frontmatter(target.read_text(encoding="utf-8-sig"))
+        except (OSError, UnicodeDecodeError):
+            existing_body = None
         if (existing_body or "").strip() != item.body.strip():
             return (f"conflict: {target.relative_to(item.root).as_posix()} exists with a different body — "
                     f"re-run with --force to overwrite or --as <new-name> to import under a new name")
@@ -177,11 +198,20 @@ def apply(base: Optional[Path], name: str, *args: str) -> str:
     if not item.body.strip():
         return f"Rule '{name}' has an empty body — nothing to import."
     content = "---\n" + "\n".join(front_lines) + "\n---\n\n" + item.body.strip() + "\n"
+    target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content, encoding="utf-8")
 
+    # Rewrite the source .md as a marked projection of the new .mdc: the canon
+    # is authoritative now and the rule must never be counted twice.
+    item.path.write_text(
+        projection_content(target.relative_to(item.root).as_posix(), globs, item.body.strip()),
+        encoding="utf-8",
+    )
+
     where = target.relative_to(item.root).as_posix()
-    kept = f"; source .md kept (next /context-rules sync will rewrite it as a projection): {item.path.relative_to(item.root).as_posix()}"
-    return f"[context-rules] imported {name} -> {where} (mode={mode}){kept}"
+    src = item.path.relative_to(item.root).as_posix()
+    return (f"[context-rules] imported {name} -> {where} (mode={mode}); "
+            f"source .md rewritten as a projection: {src}")
 
 
 def _cwd() -> Path:
@@ -211,5 +241,5 @@ _HELP = """sync-from-claude — import handwritten .claude/rules/*.md into .curs
       --as      import under a new .mdc name (resolve a conflict by renaming)
 
 Generated projections (marked files) are skipped: their canon already exists.
-The source .md is kept; the next `sync` rewrites it as a projection.
+The source .md is rewritten as a generated projection of the new .mdc.
 """
