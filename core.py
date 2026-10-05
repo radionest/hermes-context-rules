@@ -62,6 +62,13 @@ def session_cwd(explicit: Optional[str] = None) -> Path:
 # --------------------------------------------------------------------------
 # frontmatter parsing
 
+# YAML 1.1 boolean spellings (PyYAML's resolver); the fallback parser must
+# coerce exactly the same set, or mode resolution differs by environment
+# (e.g. ``alwaysApply: yes`` flipping a rule's mode depending on whether
+# PyYAML happens to be installed).
+_YAML11_TRUE = frozenset(("yes", "Yes", "YES", "on", "On", "ON", "true", "True", "TRUE"))
+_YAML11_FALSE = frozenset(("no", "No", "NO", "off", "Off", "OFF", "false", "False", "FALSE"))
+
 
 def _fallback_yaml(text: str) -> Dict[str, Any]:
     """Parse the flat ``key: value`` / ``- item`` / ``[a, b]`` subset we need."""
@@ -94,9 +101,9 @@ def _fallback_yaml(text: str) -> Dict[str, Any]:
             inner = value[1:-1].strip()
             data[key] = [_unquote(v) for v in _split_flow_items(inner)] if inner else []
             continue
-        if value in ("true", "True"):
+        if value in _YAML11_TRUE:
             data[key] = True
-        elif value in ("false", "False"):
+        elif value in _YAML11_FALSE:
             data[key] = False
         else:
             data[key] = _unquote(value)

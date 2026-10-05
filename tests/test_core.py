@@ -61,6 +61,21 @@ def mdc(tmp_path: Path, name: str, front: str, body: str) -> Path:
 # -- discovery / parsing ----------------------------------------------------
 
 
+def test_fallback_yaml_booleans_match_pyyaml():
+    """Fallback parser must coerce the same YAML 1.1 booleans as PyYAML.
+
+    Mode resolution (``alwaysApply: yes``) may not depend on whether PyYAML
+    happens to be installed — the plugin's runtime often has only the fallback.
+    """
+    for spell in ("yes", "Yes", "YES", "on", "On", "ON", "true", "True", "TRUE"):
+        assert core._fallback_yaml(f"k: {spell}") == {"k": True}, spell
+    for spell in ("no", "No", "NO", "off", "Off", "OFF", "false", "False", "FALSE"):
+        assert core._fallback_yaml(f"k: {spell}") == {"k": False}, spell
+    # single letters stayed strings in PyYAML >= 5.1 — the fallback must agree
+    assert core._fallback_yaml("k: y") == {"k": "y"}
+    assert core._fallback_yaml("k: N") == {"k": "N"}
+
+
 def test_finds_rules_and_modes(project):
     mdc(project, "py-style", "globs: src/**/*.py\nalwaysApply: false", "Use 4-space indent.")
     mdc(project, "always-house", "alwaysApply: true", "Be terse.")
