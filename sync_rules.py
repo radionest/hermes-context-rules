@@ -108,10 +108,11 @@ def sync(explicit_cwd: Optional[str] = None) -> str:
                 except (OSError, UnicodeDecodeError):
                     existing = None
                 if existing != content:
-                    # never overwrite a handwritten (unmarked) .claude rule
-                    if existing is not None and GENERATED_MARKER not in existing:
+                    # never overwrite a handwritten (unmarked) .claude rule —
+                    # or any file we could not read (may be handwritten)
+                    if existing is None or GENERATED_MARKER not in existing:
                         skipped.append(
-                            f"{target.name} (handwritten .claude rule with this name exists — "
+                            f"{target.name} (existing .claude rule with this name is handwritten or unreadable — "
                             f"import or rename it via /context-rules sync-from-claude)")
                         continue
                     target.write_text(content, encoding="utf-8")
