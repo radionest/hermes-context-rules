@@ -188,7 +188,7 @@ def apply(base: Optional[Path], name: str, *args: str) -> str:
     if rename is not None:
         # the canon is a cross-platform format: reject every path separator on
         # every OS (a "\\" name would break a Windows checkout and vice versa)
-        seps = {"/", "\\"} | {os.sep, os.altsep} - {None, ""}
+        seps = ({"/", "\\"} | {os.sep, os.altsep}) - {None, ""}
         if (not rename.strip() or any(sep in rename for sep in seps)
                 or rename.strip() != rename or rename in (".", "..")
                 or rename.startswith("-")):
@@ -248,6 +248,7 @@ def apply(base: Optional[Path], name: str, *args: str) -> str:
         proj_mode = _mode_of_meta(canon_meta)
         proj_globs = _as_glob_list(canon_meta.get("globs"))
         src = item.path.relative_to(item.root).as_posix()
+        source_backup: Optional[bytes] = None
         try:
             source_backup = item.path.read_bytes()
             item.path.write_text(
@@ -256,8 +257,10 @@ def apply(base: Optional[Path], name: str, *args: str) -> str:
                 encoding="utf-8",
             )
         except OSError as exc:
-            _restore_bytes(item.path, source_backup)  # best effort; no canon was touched
-            return f"[context-rules] failed to rewrite the source .md ({exc}); canon left unchanged."
+            restored = _restore_bytes(item.path, source_backup)
+            detail = "" if restored or source_backup is None else \
+                " and it could not be restored — inspect it manually"
+            return f"[context-rules] failed to rewrite the source .md ({exc}){detail}; canon left unchanged."
         return f"[context-rules] {name}: canon unchanged; source .md rewritten as a projection: {src}"
 
     if mode is None:
@@ -330,10 +333,22 @@ def apply(base: Optional[Path], name: str, *args: str) -> str:
         source_backup = item.path.read_bytes()
         target.write_text(content, encoding="utf-8")
     except OSError as exc:
-        # the canon write failed mid-flight: restore whatever pre-existed so no
-        # half-imported state stays (the source .md was not touched yet)
-        _restore_bytes(target, original_bytes if target_existed else None)
-        return f"[context-rules] failed to write the canon .mdc ({exc}); nothing was imported."
+        # the canon write failed mid-flight: restore whatever pre-existed, and
+        # remove a half-written NEW canon (the source .md was not touched yet).
+        # An unreadable file is kept, never blindly unlinked.
+        if target_existed:
+            ok = _restore_bytes(target, original_bytes)
+            state = "pre-existing canon restored" if ok else \
+                "pre-existing canon could not be restored — inspect it manually"
+        else:
+            state = {
+                "removed": "partial new canon removed",
+                "none": "no canon was left",
+                "kept-full": "the canon write actually landed — inspect it manually",
+                "unknown": "an unreadable partial canon was left — inspect it manually",
+            }[_remove_partial(target, content)]
+        return (f"[context-rules] failed to write the canon .mdc ({exc}); "
+                f"nothing was imported ({state}).")
 
     # Rewrite the source .md as a marked projection of the new .mdc: the canon
     # is authoritative now and the rule must never be counted twice. If this
@@ -348,16 +363,16 @@ def apply(base: Optional[Path], name: str, *args: str) -> str:
         )
     except OSError as exc:
         rollback_failed = False
+        source_restored = _restore_bytes(item.path, source_backup)
         try:
-            _restore_bytes(item.path, source_backup)
             if original_bytes is not None:
                 target.write_bytes(original_bytes)
             elif not target_existed:
-                # re-check existence/content so a concurrent import that
-                # finished in the meantime is never clobbered by our rollback
-                current: Optional[str] = None
+                # re-check content so a concurrent import that finished in the
+                # meantime (different bytes) is never clobbered by our rollback;
+                # if it is still our import, remove it
                 try:
-                    current = target.read_text(encoding="utf-8-sig")
+                    current: Optional[str] = target.read_text(encoding="utf-8-sig")
                 except (OSError, UnicodeDecodeError):
                     current = None
                 if current == content:
@@ -366,6 +381,9 @@ def apply(base: Optional[Path], name: str, *args: str) -> str:
             rollback_failed = True
         if rollback_failed:
             status = "rollback failed — inspect the canon and the source .md manually"
+        elif not source_restored:
+            status = ("source .md could not be restored — its pre-import content is lost; "
+                      "recover it from version control and inspect the canon")
         elif original_bytes is not None:
             status = "canon restored"
         elif target_existed:
@@ -386,14 +404,39 @@ def _cwd() -> Path:
     return session_cwd()
 
 
-def _restore_bytes(path: Path, backup: Optional[bytes]) -> None:
-    """Best-effort restore of a file's pre-write content (None never unlinks)."""
+def _restore_bytes(path: Path, backup: Optional[bytes]) -> bool:
+    """Best-effort restore of a file's pre-write content; True when it landed.
+
+    None is a no-op (returns True): 'no backup' must never read as 'failed'.
+    """
     if backup is None:
-        return
+        return True
     try:
         path.write_bytes(backup)
+        return True
     except OSError:
-        pass
+        return False
+
+
+def _remove_partial(path: Path, content: str) -> str:
+    """Clean up after a failed write of a file that did not exist before.
+
+    Returns an honest status: "removed" (a partial file was unlinked),
+    "none" (nothing was left), "kept-full" (the write landed despite the
+    error — the file is complete), or "unknown" (unreadable leftover; kept,
+    never blindly unlinked). Only ever called on files we just created.
+    """
+    try:
+        current = path.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeDecodeError):
+        return "none" if not path.exists() else "unknown"
+    if current == content:
+        return "kept-full"
+    try:
+        path.unlink()
+        return "removed"
+    except OSError:
+        return "unknown"
 
 
 def handle(raw_args: str) -> str:
@@ -420,6 +463,9 @@ _HELP = """sync-from-claude — import handwritten .claude/rules/*.md into .curs
       --force   overwrite an existing .mdc with a different body
       --as      import under a new .mdc name (resolve a conflict by renaming)
       --root    pick the rule root when the same name exists in several roots
+
+Rule names containing spaces are supported — quote them:
+  sync-from-claude apply "my rule" manual
 
 Generated projections (marked files) are skipped when proposing imports.
 The source .md is rewritten as a generated projection of the new .mdc.
