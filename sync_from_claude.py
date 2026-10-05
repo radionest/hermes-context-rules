@@ -16,6 +16,8 @@ the single source of truth, .claude holds projections only.
 from __future__ import annotations
 
 import json
+import os
+import shlex
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -53,15 +55,6 @@ class _Importable:
         except (OSError, UnicodeDecodeError):
             return None
         return body.strip()
-
-    def target_meta(self) -> Dict[str, object]:
-        if not self.target.exists():
-            return {}
-        try:
-            meta, _ = _parse_frontmatter(self.target.read_text(encoding="utf-8-sig"))
-        except (OSError, UnicodeDecodeError):
-            return {}
-        return meta
 
     def status(self) -> Tuple[str, str]:
         """(status, one-line detail) — ready | ask | conflict | imported."""
@@ -155,8 +148,10 @@ def _emit(front_lines: List[str], key: str, value: object) -> None:
         front_lines.append(f"{key}: {json.dumps(value)}")
     elif value is None:
         return  # never stringify a null into the canon
-    else:
+    elif isinstance(value, (int, float)):
         front_lines.append(f"{key}: {value}")
+    else:  # list, dict, date, ... — opaque carry-over; keep it re-parseable
+        front_lines.append(f"{key}: {json.dumps(value, default=str)}")
 
 
 def _carryable(mode: str, key: str) -> bool:
@@ -190,8 +185,14 @@ def apply(base: Optional[Path], name: str, *args: str) -> str:
             mode = tok
         else:
             rest.append(tok)
-    if rename is not None and (not rename.strip() or "/" in rename or rename.strip() != rename or rename.startswith("-")):
-        return f"[context-rules] invalid --as name: {rename!r}"
+    if rename is not None:
+        # the canon is a cross-platform format: reject every path separator on
+        # every OS (a "\\" name would break a Windows checkout and vice versa)
+        seps = {"/", "\\"} | {os.sep, os.altsep} - {None, ""}
+        if (not rename.strip() or any(sep in rename for sep in seps)
+                or rename.strip() != rename or rename in (".", "..")
+                or rename.startswith("-")):
+            return f"[context-rules] invalid --as name: {rename!r}"
     mode_given = mode is not None
 
     matches = [i for i in _collect(root_dir) if i.name == name]
@@ -248,12 +249,14 @@ def apply(base: Optional[Path], name: str, *args: str) -> str:
         proj_globs = _as_glob_list(canon_meta.get("globs"))
         src = item.path.relative_to(item.root).as_posix()
         try:
+            source_backup = item.path.read_bytes()
             item.path.write_text(
                 projection_content(target.relative_to(item.root).as_posix(), proj_globs,
                                    item.body.strip(), proj_mode),
                 encoding="utf-8",
             )
         except OSError as exc:
+            _restore_bytes(item.path, source_backup)  # best effort; no canon was touched
             return f"[context-rules] failed to rewrite the source .md ({exc}); canon left unchanged."
         return f"[context-rules] {name}: canon unchanged; source .md rewritten as a projection: {src}"
 
@@ -296,8 +299,6 @@ def apply(base: Optional[Path], name: str, *args: str) -> str:
     for key, value in item.meta.items():
         if not _carryable(mode, key) or value is None or key in carry:
             continue
-        if mode == "desc" and key == "globs":
-            continue
         carry[key] = value
     if mode == "always" and "globs" not in carry:
         src_globs = item.meta.get("globs")
@@ -305,8 +306,6 @@ def apply(base: Optional[Path], name: str, *args: str) -> str:
             carry["globs"] = src_globs
     for key, value in canon_meta.items():
         if key in item.meta or not _carryable(mode, key) or value is None or key in carry:
-            continue
-        if mode == "desc" and key == "globs":
             continue
         carry[key] = value
     for key, value in carry.items():
@@ -326,11 +325,21 @@ def apply(base: Optional[Path], name: str, *args: str) -> str:
             original_bytes = target.read_bytes()
         except OSError:
             original_bytes = None  # unreadable pre-existing canon: keep it, never unlink
-    target.write_text(content, encoding="utf-8")
+    source_backup: Optional[bytes] = None
+    try:
+        source_backup = item.path.read_bytes()
+        target.write_text(content, encoding="utf-8")
+    except OSError as exc:
+        # the canon write failed mid-flight: restore whatever pre-existed so no
+        # half-imported state stays (the source .md was not touched yet)
+        _restore_bytes(target, original_bytes if target_existed else None)
+        return f"[context-rules] failed to write the canon .mdc ({exc}); nothing was imported."
 
     # Rewrite the source .md as a marked projection of the new .mdc: the canon
     # is authoritative now and the rule must never be counted twice. If this
-    # second write fails, roll the canon back so no half-imported state stays.
+    # second write fails, roll the canon back so no half-imported state stays
+    # (exception: an unreadable pre-existing canon is left as written — it is
+    # kept, never unlinked — and an unreadable .md is not loaded anyway).
     try:
         item.path.write_text(
             projection_content(target.relative_to(item.root).as_posix(),
@@ -340,14 +349,23 @@ def apply(base: Optional[Path], name: str, *args: str) -> str:
     except OSError as exc:
         rollback_failed = False
         try:
+            _restore_bytes(item.path, source_backup)
             if original_bytes is not None:
                 target.write_bytes(original_bytes)
             elif not target_existed:
-                target.unlink(missing_ok=True)
+                # re-check existence/content so a concurrent import that
+                # finished in the meantime is never clobbered by our rollback
+                current: Optional[str] = None
+                try:
+                    current = target.read_text(encoding="utf-8-sig")
+                except (OSError, UnicodeDecodeError):
+                    current = None
+                if current == content:
+                    target.unlink(missing_ok=True)
         except OSError:
             rollback_failed = True
         if rollback_failed:
-            status = "canon rollback failed — inspect it manually"
+            status = "rollback failed — inspect the canon and the source .md manually"
         elif original_bytes is not None:
             status = "canon restored"
         elif target_existed:
@@ -368,9 +386,23 @@ def _cwd() -> Path:
     return session_cwd()
 
 
+def _restore_bytes(path: Path, backup: Optional[bytes]) -> None:
+    """Best-effort restore of a file's pre-write content (None never unlinks)."""
+    if backup is None:
+        return
+    try:
+        path.write_bytes(backup)
+    except OSError:
+        pass
+
+
 def handle(raw_args: str) -> str:
     """Slash-command entry point: ``sync-from-claude [apply <name> [mode...] [--force] [--as <n>] [--root <dir>]]``."""
-    argv = (raw_args or "").strip().split()
+    raw = (raw_args or "").strip()
+    try:
+        argv = shlex.split(raw)
+    except ValueError as exc:
+        return f"[context-rules] cannot parse arguments ({exc}); quote names containing spaces."
     if not argv or argv[0] == "propose":
         return propose()
     if argv[0] == "apply":

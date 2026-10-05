@@ -150,8 +150,11 @@ def sync(explicit_cwd: Optional[str] = None) -> str:
                 gone = stale.stem not in canon_stems
                 duplicate = False
             if gone or duplicate:
-                stale.unlink()
-                removed.append(stale.name)
+                try:
+                    stale.unlink()
+                    removed.append(stale.name)
+                except OSError:
+                    skipped.append(f"{stale.name} (could not remove the stale projection)")
 
     lines = [f"context-rules sync: roots={len(roots)} cursor-rules={len(cursor_rules)}"]
     for label, items in (("created", created), ("updated", updated), ("removed", removed), ("unchanged", kept)):
