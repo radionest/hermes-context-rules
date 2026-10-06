@@ -14,10 +14,10 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO))
 
-import core  # noqa: E402
-import enforce, sync_rules  # noqa: E402
+# Mirror the real loader: the plugin dir is imported as a package, never put on
+# sys.path. Keep the scrub so flat-import regressions cannot be masked here.
+sys.path[:] = [p for p in sys.path if Path(p or ".").resolve() != REPO.resolve()]
 
 
 def _load_plugin():
@@ -28,9 +28,17 @@ def _load_plugin():
     spec = importlib.util.spec_from_file_location(
         name, REPO / "__init__.py", submodule_search_locations=[str(REPO)])
     module = importlib.util.module_from_spec(spec)
+    module.__package__ = name
+    module.__path__ = [str(REPO)]
     sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
+
+
+_plugin = _load_plugin()
+core = _plugin.core
+enforce = _plugin.enforce
+sync_rules = _plugin.sync_rules
 
 
 @pytest.fixture()
@@ -51,6 +59,21 @@ def mdc(tmp_path: Path, name: str, front: str, body: str) -> Path:
 
 
 # -- discovery / parsing ----------------------------------------------------
+
+
+def test_fallback_yaml_booleans_match_pyyaml():
+    """Fallback parser must coerce the same YAML 1.1 booleans as PyYAML.
+
+    Mode resolution (``alwaysApply: yes``) may not depend on whether PyYAML
+    happens to be installed — the plugin's runtime often has only the fallback.
+    """
+    for spell in ("yes", "Yes", "YES", "on", "On", "ON", "true", "True", "TRUE"):
+        assert core._fallback_yaml(f"k: {spell}") == {"k": True}, spell
+    for spell in ("no", "No", "NO", "off", "Off", "OFF", "false", "False", "FALSE"):
+        assert core._fallback_yaml(f"k: {spell}") == {"k": False}, spell
+    # single letters stayed strings in PyYAML >= 5.1 — the fallback must agree
+    assert core._fallback_yaml("k: y") == {"k": "y"}
+    assert core._fallback_yaml("k: N") == {"k": "N"}
 
 
 def test_finds_rules_and_modes(project):

@@ -15,9 +15,10 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import core
-import enforce as enforce_mod
-import sync_rules
+from . import core
+from . import enforce as enforce_mod
+from . import sync_rules
+from . import sync_from_claude
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +164,12 @@ def _handle_slash(raw_args: str) -> Optional[str]:
             return _cmd_show(" ".join(argv[1:]))
         if sub == "sync":
             return sync_rules.sync()
+        if sub == "sync-from-claude":
+            # pass the raw remainder through: re-joining split() tokens
+            # would collapse whitespace runs inside quoted rule names
+            # (a rule literally named "a  b" must stay findable)
+            rest = (raw_args or "").strip()[len("sync-from-claude"):]
+            return sync_from_claude.handle(rest)
         if sub == "verify":
             return _cmd_verify()
         return _HELP
@@ -176,6 +183,7 @@ _HELP = """/context-rules — conditional project rules (.cursor/rules, .claude/
   list              rule names only
   show <name>       full text of one rule
   sync              regenerate .claude/rules/*.md from .cursor/rules/*.mdc (Claude Code compat)
+  sync-from-claude  import handwritten .claude/rules/*.md into .cursor/rules/*.mdc (propose/apply)
   verify            run enforce gates now over files changed this turn
 """
 
@@ -235,5 +243,5 @@ def register(ctx) -> None:
         logger.debug("system prompt section unavailable", exc_info=True)
     ctx.register_command(
         "context-rules", handler=_handle_slash,
-        description="Conditional project rules (.cursor/rules, .claude/rules): status, show, sync, verify.",
+        description="Conditional project rules (.cursor/rules, .claude/rules): status, show, sync, sync-from-claude, verify.",
     )

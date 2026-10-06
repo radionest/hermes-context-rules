@@ -12,6 +12,11 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 
+# The real loader imports the plugin as a package (hermes_plugins.<slug>) and
+# never puts the plugin dir on sys.path. Scrub it so this test cannot mask
+# flat-import regressions the way production would hit them.
+sys.path[:] = [p for p in sys.path if Path(p or ".").resolve() != REPO.resolve()]
+
 HERMES_SRC = Path(os.environ.get("HERMES_SRC", "/home/nest/.hermes/hermes-agent"))
 assert (HERMES_SRC / "hermes_cli" / "plugins.py").exists(), f"Hermes source not found at {HERMES_SRC}"
 
@@ -22,7 +27,6 @@ os.symlink(REPO, sandbox / "plugins" / "context-rules", target_is_directory=True
 
 os.environ["HERMES_HOME"] = str(sandbox)
 sys.path.insert(0, str(HERMES_SRC))
-sys.path.insert(0, str(REPO))
 
 import hermes_cli.plugins as hp  # noqa: E402
 

@@ -6,4 +6,11 @@ requires-python = ">=3.10"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["."]
+addopts = "--import-mode=importlib"
+consider_namespace_packages = true
+
+[dependency-groups]
+dev = [
+    "pytest>=8.1",
+    "ruamel-yaml>=0.18",
+]

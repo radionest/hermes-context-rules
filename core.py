@@ -6,6 +6,7 @@ resolver only, with an os.getcwd() fallback) so this package is testable standal
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import threading
@@ -62,6 +63,13 @@ def session_cwd(explicit: Optional[str] = None) -> Path:
 # --------------------------------------------------------------------------
 # frontmatter parsing
 
+# YAML 1.1 boolean spellings (PyYAML's resolver); the fallback parser must
+# coerce exactly the same set, or mode resolution differs by environment
+# (e.g. ``alwaysApply: yes`` flipping a rule's mode depending on whether
+# PyYAML happens to be installed).
+_YAML11_TRUE = frozenset(("yes", "Yes", "YES", "on", "On", "ON", "true", "True", "TRUE"))
+_YAML11_FALSE = frozenset(("no", "No", "NO", "off", "Off", "OFF", "false", "False", "FALSE"))
+
 
 def _fallback_yaml(text: str) -> Dict[str, Any]:
     """Parse the flat ``key: value`` / ``- item`` / ``[a, b]`` subset we need."""
@@ -74,9 +82,11 @@ def _fallback_yaml(text: str) -> Dict[str, Any]:
             continue
         if stripped.startswith("- ") and current_list_key:
             item = _unquote(stripped[2:].strip())
-            values = data.setdefault(current_list_key, [])
-            if isinstance(values, list):
-                values.append(item)
+            values = data.get(current_list_key)
+            if not isinstance(values, list):
+                values = []
+                data[current_list_key] = values
+            values.append(item)
             continue
         if ":" not in stripped:
             continue
@@ -86,14 +96,25 @@ def _fallback_yaml(text: str) -> Dict[str, Any]:
         current_list_key = None
         if not value:
             data[key] = None
+            current_list_key = key  # a block list ("- item" lines) may follow
             continue
         if value.startswith("[") and value.endswith("]"):
             inner = value[1:-1].strip()
-            data[key] = [_unquote(v.strip()) for v in inner.split(",") if v.strip()] if inner else []
+            data[key] = [_unquote(v) for v in _split_flow_items(inner)] if inner else []
             continue
-        if value in ("true", "True"):
+        if value.startswith("{") and value.endswith("}"):
+            # JSON flow mapping — the exact shape _emit() writes for opaque
+            # dict-valued metadata (json.dumps). Decode it so the parsed
+            # type matches PyYAML's; anything unparsable stays a string
+            # (the pre-change behavior).
+            try:
+                data[key] = json.loads(value)
+                continue
+            except ValueError:
+                pass
+        if value in _YAML11_TRUE:
             data[key] = True
-        elif value in ("false", "False"):
+        elif value in _YAML11_FALSE:
             data[key] = False
         else:
             data[key] = _unquote(value)
@@ -106,9 +127,79 @@ def _fallback_yaml(text: str) -> Dict[str, Any]:
     return data
 
 
+_DQ_ESCAPES = {'"': '"', "\\": "\\", "/": "/", "n": "\n", "t": "\t",
+               "r": "\r", "b": "\b", "f": "\f", "0": "\0"}
+
+
+def _decode_dq(inner: str) -> str:
+    """Decode YAML double-quoted escapes (the json.dumps subset we write)."""
+    out: List[str] = []
+    i = 0
+    while i < len(inner):
+        ch = inner[i]
+        if ch == "\\" and i + 1 < len(inner):
+            nxt = inner[i + 1]
+            if nxt == "u" and i + 6 <= len(inner):
+                try:
+                    out.append(chr(int(inner[i + 2 : i + 6], 16)))
+                    i += 6
+                    continue
+                except ValueError:
+                    pass
+            out.append(_DQ_ESCAPES.get(nxt, nxt))
+            i += 2
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _split_flow_items(inner: str) -> List[str]:
+    """Split a flow-sequence body on commas that are not inside quotes.
+
+    Backslash escapes are honored inside double quotes (YAML double-quoted
+    scalars), so an escaped quote does not close the string.
+    """
+    items: List[str] = []
+    buf: List[str] = []
+    quote: Optional[str] = None
+    i = 0
+    while i < len(inner):
+        ch = inner[i]
+        if quote == '"':
+            if ch == "\\" and i + 1 < len(inner):
+                buf.append(ch)
+                buf.append(inner[i + 1])
+                i += 2
+                continue
+            buf.append(ch)
+            if ch == '"':
+                quote = None
+        elif quote == "'":
+            buf.append(ch)
+            if ch == "'":
+                quote = None
+        elif ch in ("'", '"'):
+            quote = ch
+            buf.append(ch)
+        elif ch == ",":
+            items.append("".join(buf).strip())
+            buf = []
+        else:
+            buf.append(ch)
+        i += 1
+    tail = "".join(buf).strip()
+    if tail or items:
+        items.append(tail)
+    return [it for it in items if it]
+
+
 def _unquote(value: str) -> str:
     if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
-        return value[1:-1]
+        inner = value[1:-1]
+        if value[0] == '"':
+            return _decode_dq(inner)
+        return inner.replace("''", "'")
     return value
 
 
