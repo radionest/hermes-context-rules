@@ -470,8 +470,8 @@ def test_apply_desc_boolean_not_stringified(tmp_path):
     project = make_project(tmp_path)
     # PyYAML parses 'yes' as True; the raw text must not become "True"
     claude_md(project, "db", "---\ndescription: yes\n---\n\nBody.\n")
-    out = sync_from_claude.apply(project, "db")  # mode: desc from frontmatter
-    assert "needs a description" in out  # explicit error, no silent "True" canon
+    out = sync_from_claude.apply(project, "db")  # no explicit mode
+    assert "a mode is required" in out  # explicit error, no silent "True" canon
     assert not (project / ".cursor" / "rules" / "db.mdc").exists()
     out2 = sync_from_claude.apply(project, "db", "desc", "yes")
     assert "imported" in out2
@@ -549,3 +549,154 @@ def test_emit_serializes_opaque_values_as_json(tmp_path):
     canon = (project / ".cursor" / "rules" / "meta.mdc").read_text(encoding="utf-8-sig")
     fm, _ = core._parse_frontmatter(canon)
     assert fm.get("tags") == ["a", "b"], canon  # re-parseable, not a Python repr string
+
+
+def test_handle_slash_preserves_double_space_in_quoted_name(tmp_path, monkeypatch):
+    """CodeRabbit: _handle_slash re-joined split() tokens, collapsing the
+    double space in "a  b" to "a b" before handle() could parse it."""
+    project = make_project(tmp_path)
+    claude_md(project, "a  b", "Body.\n")
+    monkeypatch.setattr(core, "session_cwd", lambda explicit=None: project)
+    out = _plugin._handle_slash('sync-from-claude apply "a  b" manual')
+    assert "imported a  b" in out
+    assert (project / ".cursor" / "rules" / "a  b.mdc").exists()
+
+
+def test_apply_writes_body_verbatim(tmp_path):
+    """Sourcery :323 — the body is copied without .strip(): leading spaces
+    and trailing blank lines survive to the canon and the projection.
+    (The parser itself normalizes the blank line right after ``---`` and
+    the final newline; the reference is the parsed source body.)"""
+    project = make_project(tmp_path)
+    raw = "---\nalwaysApply: true\n---\n\n\n   Padded wisdom.   \n\n\n"
+    claude_md(project, "padded", raw)
+    _, parsed_body = core._parse_frontmatter(raw)
+    assert parsed_body == "   Padded wisdom.   \n\n"  # the parser's verbatim view
+    out = sync_from_claude.apply(project, "padded")
+    assert "imported padded" in out
+    canon = (project / ".cursor" / "rules" / "padded.mdc").read_text(encoding="utf-8-sig")
+    _, canon_body = core._parse_frontmatter(canon)
+    assert canon_body == parsed_body, canon
+    proj = (project / ".claude" / "rules" / "padded.md").read_text(encoding="utf-8-sig")
+    assert proj.endswith(parsed_body + "\n"), proj  # same unstripped body
+
+
+def test_apply_rejects_whitespace_only_body(tmp_path):
+    project = make_project(tmp_path)
+    claude_md(project, "empty", "---\nalwaysApply: true\n---\n\n   \n\t\n")
+    out = sync_from_claude.apply(project, "empty")
+    assert "empty body" in out
+    assert not (project / ".cursor" / "rules" / "empty.mdc").exists()
+
+
+def test_propose_non_string_description_is_not_ready(tmp_path):
+    """Sourcery :79 — description: yes parsed as boolean True must not
+    resolve to desc mode via str(True); propose reports 'ask' and apply
+    without an explicit mode refuses (propose/apply agree)."""
+    project = make_project(tmp_path)
+    claude_md(project, "truthy", "---\ndescription: yes\n---\n\nBody.\n")
+    report = sync_from_claude.propose(project)
+    assert "description: True" not in report  # never a desc mode from str(True)
+    assert "ask" in report and "not a usable string" in report
+    # apply without a mode refuses instead of importing manual silently
+    out = sync_from_claude.apply(project, "truthy")
+    assert "a mode is required" in out
+    assert not (project / ".cursor" / "rules" / "truthy.mdc").exists()
+    # an explicit mode is the way through
+    out2 = sync_from_claude.apply(project, "truthy", "manual")
+    assert "imported truthy" in out2
+
+
+def test_apply_non_string_description_desc_mode_needs_text(tmp_path):
+    """desc mode with no text and a non-string meta description errors."""
+    project = make_project(tmp_path)
+    claude_md(project, "truthy", "---\ndescription: on\n---\n\nBody.\n")
+    out = sync_from_claude.apply(project, "truthy", "desc")
+    assert "desc mode needs a description" in out
+
+
+def test_fallback_parser_decodes_json_flow_mapping():
+    """Sourcery :154 — the fallback must restore the dicts _emit() writes."""
+    text = 'meta: {"k": "v", "n": 1, "nested": {"deep": [true, null]}}\n'
+    parsed = core._fallback_yaml(text)
+    assert parsed == {"meta": {"k": "v", "n": 1,
+                               "nested": {"deep": [True, None]}}}, parsed
+
+
+def test_fallback_parser_malformed_brace_value_stays_string():
+    parsed = core._fallback_yaml("meta: {not json at all\n")
+    assert parsed == {"meta": "{not json at all"}, parsed
+
+
+def test_import_dict_metadata_survives_fallback_reparse(tmp_path, monkeypatch):
+    """End-to-end: a dict-valued opaque key round-trips through the canon
+    with the same type in fallback-only environments."""
+    project = make_project(tmp_path)
+    claude_md(project, "dicty", "---\nowner: me\n---\n\nBody.\n")
+    # a dict-valued carry-over key (as if parsed from a richer source)
+    item = sync_from_claude._Importable(
+        project / ".claude" / "rules" / "dicty.md", project)
+    item.meta["x-config"] = {"timeout": 30, "tags": ["a", "b"]}
+    monkeypatch.setattr(sync_from_claude, "_collect", lambda base: [item])
+    out = sync_from_claude.apply(project, "dicty", "manual")
+    assert "imported dicty" in out
+    canon = (project / ".cursor" / "rules" / "dicty.mdc").read_text(encoding="utf-8-sig")
+    fm, _ = core._parse_frontmatter(canon)
+    # PyYAML (test env) and the fallback must agree on the type
+    assert fm.get("x-config") == {"timeout": 30, "tags": ["a", "b"]}, canon
+    fm_line = next(ln for ln in canon.splitlines() if ln.startswith("x-config:"))
+    fm_fallback = core._fallback_yaml(fm_line)
+    assert fm_fallback.get("x-config") == {"timeout": 30, "tags": ["a", "b"]}, fm_line
+
+
+def test_rollback_preserves_concurrent_canon_write(tmp_path, monkeypatch):
+    """Sourcery :369 — a concurrent writer's canon update must survive our
+    rollback after a failed projection rewrite."""
+    project = make_project(tmp_path)
+    src = claude_md(project, "db", "---\ndescription: notes\n---\n\nHandwritten wisdom v2.\n")
+    original = src.read_bytes()
+    pre_existing = mdc(project, "db", "alwaysApply: true", "Handwritten wisdom.")
+    original_canon = pre_existing.read_bytes()
+
+    real_write_text = Path.write_text
+
+    def failing_write_text(self, data, encoding=None, errors=None, newline=None):
+        if self.name == "db.md":  # the projection rewrite fails
+            # a concurrent writer updates the canon between our write and rollback
+            real_write_text(pre_existing, "---\nalwaysApply: true\n---\n\nRaced content.\n",
+                            encoding="utf-8")
+            raise OSError(28, "No space left on device")
+        return real_write_text(self, data, encoding=encoding, errors=errors, newline=newline)
+
+    monkeypatch.setattr(Path, "write_text", failing_write_text)
+    out = sync_from_claude.apply(project, "db", "--force")
+    monkeypatch.undo()
+    assert "import failed" in out
+    assert "concurrent writer" in out
+    # the racer's bytes survive; the pre-import canon bytes are NOT restored
+    assert pre_existing.read_bytes() != original_canon
+    assert b"Raced content." in pre_existing.read_bytes()
+    # source restored byte-for-byte
+    assert src.read_bytes() == original
+
+
+def test_rollback_restores_unchanged_canon(tmp_path, monkeypatch):
+    """The guard must not break the normal restore path."""
+    project = make_project(tmp_path)
+    claude_md(project, "db", "---\ndescription: notes\n---\n\nHandwritten wisdom v2.\n")
+    pre_existing = mdc(project, "db", "alwaysApply: true", "Handwritten wisdom.")
+    original_canon = pre_existing.read_bytes()
+
+    real_write_text = Path.write_text
+
+    def failing_write_text(self, data, encoding=None, errors=None, newline=None):
+        if self.name == "db.md":
+            raise OSError(28, "No space left on device")
+        return real_write_text(self, data, encoding=encoding, errors=errors, newline=newline)
+
+    monkeypatch.setattr(Path, "write_text", failing_write_text)
+    out = sync_from_claude.apply(project, "db", "--force")
+    monkeypatch.undo()
+    assert "import failed" in out
+    assert "canon restored" in out
+    assert pre_existing.read_bytes() == original_canon

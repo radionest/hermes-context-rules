@@ -165,7 +165,11 @@ def _handle_slash(raw_args: str) -> Optional[str]:
         if sub == "sync":
             return sync_rules.sync()
         if sub == "sync-from-claude":
-            return sync_from_claude.handle(" ".join(argv[1:]))
+            # pass the raw remainder through: re-joining split() tokens
+            # would collapse whitespace runs inside quoted rule names
+            # (a rule literally named "a  b" must stay findable)
+            rest = (raw_args or "").strip()[len("sync-from-claude"):]
+            return sync_from_claude.handle(rest)
         if sub == "verify":
             return _cmd_verify()
         return _HELP

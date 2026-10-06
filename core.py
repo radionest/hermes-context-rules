@@ -6,6 +6,7 @@ resolver only, with an os.getcwd() fallback) so this package is testable standal
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import threading
@@ -101,6 +102,16 @@ def _fallback_yaml(text: str) -> Dict[str, Any]:
             inner = value[1:-1].strip()
             data[key] = [_unquote(v) for v in _split_flow_items(inner)] if inner else []
             continue
+        if value.startswith("{") and value.endswith("}"):
+            # JSON flow mapping — the exact shape _emit() writes for opaque
+            # dict-valued metadata (json.dumps). Decode it so the parsed
+            # type matches PyYAML's; anything unparsable stays a string
+            # (the pre-change behavior).
+            try:
+                data[key] = json.loads(value)
+                continue
+            except ValueError:
+                pass
         if value in _YAML11_TRUE:
             data[key] = True
         elif value in _YAML11_FALSE:

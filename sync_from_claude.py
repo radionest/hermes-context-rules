@@ -65,8 +65,25 @@ class _Importable:
         if not self.has_meta:
             unknowns = ["mode (always | glob <globs...> | desc <text...> | manual)"]
             return "ask", "missing frontmatter — unknown: " + "; ".join(unknowns)
+        if self._needs_explicit_mode():
+            return ("ask", "description is not a usable string — unknown: "
+                    "mode (always | glob <globs...> | desc <text...> | manual)")
         mode, detail = self._mode_from_meta()
         return "ready", detail or f"mode={mode}"
+
+    def _needs_explicit_mode(self) -> bool:
+        """A non-string description is the only mode marker — resolve nothing.
+
+        YAML 1.1 turns ``description: yes`` into boolean True; stringifying it
+        would masquerade as a real description. propose() must ask for a mode
+        and apply() without an explicit mode must refuse.
+        """
+        if self.meta.get("alwaysApply") is True:
+            return False
+        if _as_glob_list(self.meta.get("globs")):
+            return False
+        desc = self.meta.get("description")
+        return desc is not None and not isinstance(desc, str)
 
     def _mode_from_meta(self) -> Tuple[str, str]:
         if self.meta.get("alwaysApply") is True:
@@ -74,9 +91,9 @@ class _Importable:
         globs = _as_glob_list(self.meta.get("globs"))
         if globs:
             return "glob", "globs: " + ", ".join(globs)
-        desc = str(self.meta.get("description") or "").strip()
-        if desc:
-            return "desc", f"description: {desc}"
+        desc = self.meta.get("description")
+        if isinstance(desc, str) and desc.strip():
+            return "desc", f"description: {desc.strip()}"
         return "manual", "frontmatter present, no mode markers -> manual"
 
 
@@ -86,7 +103,8 @@ def _mode_of_meta(meta: Dict[str, object]) -> str:
         return "always"
     if _as_glob_list(meta.get("globs")):
         return "glob"
-    if str(meta.get("description") or "").strip():
+    desc = meta.get("description")
+    if isinstance(desc, str) and desc.strip():
         return "desc"
     return "manual"
 
@@ -221,6 +239,12 @@ def apply(base: Optional[Path], name: str, *args: str) -> str:
             else:
                 return (f"Rule '{name}' has no frontmatter — a mode is required: "
                         f"apply {name} always | glob <globs...> | desc <text...> | manual")
+        elif item._needs_explicit_mode():
+            # a non-string description must not silently become anything —
+            # propose() reported this rule as 'ask' for exactly this reason
+            return (f"Rule '{name}' has a non-string description (parsed as "
+                    f"{type(item.meta.get('description')).__name__}) — a mode is "
+                    f"required: apply {name} always | glob <globs...> | desc <text...> | manual")
         else:
             mode, _ = item._mode_from_meta()
 
@@ -253,7 +277,7 @@ def apply(base: Optional[Path], name: str, *args: str) -> str:
             source_backup = item.path.read_bytes()
             item.path.write_text(
                 projection_content(target.relative_to(item.root).as_posix(), proj_globs,
-                                   item.body.strip(), proj_mode),
+                                   item.body, proj_mode),
                 encoding="utf-8",
             )
         except OSError as exc:
@@ -320,7 +344,7 @@ def apply(base: Optional[Path], name: str, *args: str) -> str:
 
     if not item.body.strip():
         return f"Rule '{name}' has an empty body — nothing to import."
-    content = "---\n" + "\n".join(front_lines) + "\n---\n\n" + item.body.strip() + "\n"
+    content = "---\n" + "\n".join(front_lines) + "\n---\n\n" + item.body + "\n"
     target.parent.mkdir(parents=True, exist_ok=True)
     original_bytes: Optional[bytes] = None
     if target_existed:
@@ -358,15 +382,24 @@ def apply(base: Optional[Path], name: str, *args: str) -> str:
     try:
         item.path.write_text(
             projection_content(target.relative_to(item.root).as_posix(),
-                               globs if mode == "glob" else [], item.body.strip(), mode),
+                               globs if mode == "glob" else [], item.body, mode),
             encoding="utf-8",
         )
     except OSError as exc:
         rollback_failed = False
         source_restored = _restore_bytes(item.path, source_backup)
+        canon_foreign = False
+        canon_unreadable = False
         try:
             if original_bytes is not None:
-                target.write_bytes(original_bytes)
+                # restore only what we wrote: a concurrent writer that changed
+                # the canon since our write must never be clobbered
+                try:
+                    canon_foreign = target.read_bytes() != content.encode("utf-8")
+                except OSError:
+                    canon_unreadable = True  # leave it, never guess
+                if not canon_foreign:
+                    target.write_bytes(original_bytes)
             elif not target_existed:
                 # re-check content so a concurrent import that finished in the
                 # meantime (different bytes) is never clobbered by our rollback;
@@ -385,7 +418,12 @@ def apply(base: Optional[Path], name: str, *args: str) -> str:
             status = ("source .md could not be restored — its pre-import content is lost; "
                       "recover it from version control and inspect the canon")
         elif original_bytes is not None:
-            status = "canon restored"
+            if canon_unreadable:
+                status = "canon left as written (unreadable — could not verify it is still ours)"
+            elif canon_foreign:
+                status = "canon left as written (changed by a concurrent writer after our import)"
+            else:
+                status = "canon restored"
         elif target_existed:
             status = "pre-existing canon left as written (it was unreadable before the import)"
         else:
