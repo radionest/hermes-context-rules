@@ -97,8 +97,8 @@ present, otherwise a mode/glob apply-note), sorted by rule name. Sync
 rewrites **only the lines strictly between the markers**; every other byte of
 AGENTS.md is yours. Missing AGENTS.md is created with a `# Project rules`
 heading plus the block; zero rules leaves the markers with the lines cleared;
-a malformed block (exactly one marker) is reported as skipped and never
-auto-repaired.
+a malformed block (a missing or doubled marker) is reported as skipped and
+never auto-repaired.
 
 Invariants, identical for both targets:
 
