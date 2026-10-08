@@ -42,14 +42,17 @@ _MODE_NOTES = {
 }
 
 
+def _apply_note(globs: List[str], mode: str) -> str:
+    """The one-line apply note, shared by projections and digest summaries."""
+    if mode == "glob" and globs:
+        return f"Apply when working with files matching: {', '.join(globs)}."
+    return _MODE_NOTES.get(mode, "Apply when relevant.")
+
+
 def projection_content(relpath: str, globs: List[str], body: str, mode: str = "glob") -> str:
     """The marked .claude/rules/*.md projection of a canonical .mdc."""
     header = f"{GENERATED_MARKER} from {relpath} — do not edit here; edit the .mdc. -->"
-    if mode == "glob" and globs:
-        note = f"Apply when working with files matching: {', '.join(globs)}."
-    else:
-        note = _MODE_NOTES.get(mode, "Apply when relevant.")
-    return f"{header}\n\n{note}\n\n{body}\n"
+    return f"{header}\n\n{_apply_note(globs, mode)}\n\n{body}\n"
 
 
 _PROJECTION_SRC_RE = re.compile(re.escape(GENERATED_MARKER) + r" from (.*?) — do not edit")
@@ -159,6 +162,54 @@ def _materialize_root(
 
 _TARGETS = ("claude", "zcode", "all")
 
+DIGEST_BEGIN = "<!-- BEGIN:RULE-DIGESTS -->"
+DIGEST_END = "<!-- END:RULE-DIGESTS -->"
+_AGENTS_HEADING = "# Project rules"
+
+
+def _digest_line(rule: Rule) -> str:
+    summary = rule.description or _apply_note(rule.globs, rule.mode)
+    return f"- **{rule.name}** — {summary}"
+
+
+def _write_digest(root: Path, cursor_rules: List[Rule]) -> str:
+    """Regenerate the zcode digest block in ``<root>/AGENTS.md``.
+
+    Only the lines strictly between the markers are ever rewritten; the rest
+    of the file is byte-identical. A file with exactly one marker (malformed
+    block) is never auto-repaired. Returns a report line ('digest: created',
+    'updated', 'cleared', 'unchanged' or 'digest: skipped (...)').
+    """
+    rules = sorted(
+        (r for r in cursor_rules if r.root == root), key=lambda r: r.name
+    )
+    lines = [_digest_line(r) for r in rules]
+    block = "\n".join([_AGENTS_HEADING, "", DIGEST_BEGIN, *lines, DIGEST_END, ""])
+    agents = root / "AGENTS.md"
+    try:
+        existing = agents.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeDecodeError):
+        agents.write_text(block, encoding="utf-8")
+        return "digest: created"
+    begin_count = existing.count(DIGEST_BEGIN)
+    end_count = existing.count(DIGEST_END)
+    if (begin_count == 0) != (end_count == 0):
+        return "digest: skipped (exactly one RULE-DIGESTS marker in AGENTS.md — not auto-repaired)"
+    if begin_count == 0:
+        agents.write_text(existing.rstrip("\n") + "\n\n" + block, encoding="utf-8")
+        return "digest: created"
+    begin_idx = existing.index(DIGEST_BEGIN) + len(DIGEST_BEGIN)
+    end_idx = existing.index(DIGEST_END)
+    if begin_idx > end_idx:
+        return "digest: skipped (RULE-DIGESTS markers out of order in AGENTS.md — not auto-repaired)"
+    inner = existing[begin_idx:end_idx]
+    before, after = existing[:begin_idx], existing[end_idx:]
+    new_inner = ("\n" + "\n".join(lines) + "\n") if lines else "\n"
+    if inner == new_inner:
+        return "digest: unchanged"
+    agents.write_text(before + new_inner + after, encoding="utf-8")
+    return "digest: updated" if lines else "digest: cleared"
+
 
 def sync(explicit_cwd: Optional[str] = None, target: str = "claude") -> str:
     """Materialize cursor rules into flat projections for *target*; report.
@@ -178,12 +229,12 @@ def sync(explicit_cwd: Optional[str] = None, target: str = "claude") -> str:
     rules = load_rules(base)
     cursor_rules = [r for r in rules if r.source == "cursor"]
     targets = ["claude", "zcode"] if target == "all" else [target]
-    sections = [_sync_target(base, roots, cursor_rules, t) for t in targets]
+    sections = [_sync_target(roots, cursor_rules, t) for t in targets]
     return "\n\n".join(sections)
 
 
 def _sync_target(
-    base: Path, roots: List[Path], cursor_rules: List[Rule], target: str
+    roots: List[Path], cursor_rules: List[Rule], target: str
 ) -> str:
     """Run one sync target over all roots and render its report section."""
     created: List[str] = []
