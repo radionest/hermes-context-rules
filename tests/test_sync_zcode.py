@@ -146,3 +146,124 @@ def test_all_target_runs_claude_first_then_zcode(tmp_path):
     assert "created: py.md" in sections[1]
     assert "digest: created" in sections[1]
     assert "digest" not in sections[0]
+
+
+# ---------------------------------------------------------------------------
+# digest block in AGENTS.md (task 4.2)
+
+
+def agents(project: Path) -> Path:
+    return project / "AGENTS.md"
+
+
+def digest_lines_of(text: str) -> list:
+    begin = text.index(sync_rules.DIGEST_BEGIN)
+    end = text.index(sync_rules.DIGEST_END)
+    return [ln for ln in text[begin + len(sync_rules.DIGEST_BEGIN):end].splitlines() if ln.strip()]
+
+
+def test_digest_created_in_missing_agents_md(tmp_path):
+    project = make_project(tmp_path)
+    three_canon_rules(project)
+    out = sync_rules.sync(str(project), target="zcode")
+    text = agents(project).read_text()
+    assert text.startswith("# Project rules\n\n<!-- BEGIN:RULE-DIGESTS -->\n")
+    assert text.endswith("<!-- END:RULE-DIGESTS -->\n")
+    # one line per rule, sorted by name, description preferred over note
+    assert digest_lines_of(text) == [
+        "- **db** — DB guardrails",
+        "- **py** — Apply when working with files matching: **/*.py.",
+        "- **team** — Apply unconditionally.",
+    ]
+    assert "digest: created" in out
+
+
+def test_digest_preserves_handwritten_paragraphs_byte_for_byte(tmp_path):
+    project = make_project(tmp_path)
+    three_canon_rules(project)
+    before_text = (
+        "# Workspace notes\n\nHandwritten intro paragraph.\n\n"
+        "<!-- BEGIN:RULE-DIGESTS -->\nstale line\n<!-- END:RULE-DIGESTS -->\n\n"
+        "Handwritten outro, must survive.\n"
+    )
+    agents(project).write_text(before_text)
+    out1 = sync_rules.sync(str(project), target="zcode")
+    after1 = agents(project).read_text()
+    assert "- **db** — DB guardrails" in after1
+    assert "stale line" not in after1
+    assert "digest: updated" in out1
+    # second sync: idempotent, paragraphs still byte-identical
+    out2 = sync_rules.sync(str(project), target="zcode")
+    after2 = agents(project).read_text()
+    assert after1 == after2
+    assert "digest: unchanged" in out2
+    # only the marked block moved; the prose is untouched
+    assert after1.startswith("# Workspace notes\n\nHandwritten intro paragraph.\n\n")
+    assert after1.endswith("Handwritten outro, must survive.\n")
+
+
+def test_digest_line_dropped_when_canon_deleted(tmp_path):
+    project = make_project(tmp_path)
+    three_canon_rules(project)
+    sync_rules.sync(str(project), target="zcode")
+    (project / ".cursor" / "rules" / "db.mdc").unlink()
+    out = sync_rules.sync(str(project), target="zcode")
+    text = agents(project).read_text()
+    lines = digest_lines_of(text)
+    assert len(lines) == 2
+    assert "db" not in " ".join(lines)
+    assert "digest: updated" in out
+
+
+def test_single_marker_file_is_skipped_untouched(tmp_path):
+    project = make_project(tmp_path)
+    three_canon_rules(project)
+    malformed = (
+        "# Notes\n\n<!-- BEGIN:RULE-DIGESTS -->\noperator content here\n"
+    )
+    agents(project).write_text(malformed)
+    before_bytes = agents(project).read_bytes()
+    before_m = agents(project).stat().st_mtime_ns
+    out = sync_rules.sync(str(project), target="zcode")
+    assert agents(project).read_bytes() == before_bytes
+    assert agents(project).stat().st_mtime_ns == before_m
+    assert "digest: skipped" in out
+    assert "not auto-repaired" in out
+
+
+def test_zero_rules_clears_lines_keeps_markers(tmp_path):
+    project = make_project(tmp_path)
+    three_canon_rules(project)
+    sync_rules.sync(str(project), target="zcode")
+    for f in (project / ".cursor" / "rules").glob("*.mdc"):
+        f.unlink()
+    out = sync_rules.sync(str(project), target="zcode")
+    text = agents(project).read_text()
+    assert digest_lines_of(text) == []
+    assert sync_rules.DIGEST_BEGIN in text and sync_rules.DIGEST_END in text
+    assert "digest: cleared" in out
+
+
+def test_unknown_target_usage_error_writes_nothing(tmp_path, monkeypatch):
+    project = make_project(tmp_path)
+    three_canon_rules(project)
+    monkeypatch.setattr(sync_rules, "session_cwd", lambda explicit=None: project)
+    # direct plugin invocation, exactly how the slash command dispatches
+    out = _plugin._handle_slash("sync --target vim")
+    assert "usage" in out.lower()
+    assert "claude" in out and "zcode" in out and "all" in out
+    assert not (project / ".zcode").exists()
+    assert not (project / "AGENTS.md").exists()
+    assert not list((project / ".claude" / "rules").glob("*.md"))
+
+
+def test_target_form_equivalent_and_rejected_tokens(tmp_path, monkeypatch):
+    project = make_project(tmp_path)
+    three_canon_rules(project)
+    monkeypatch.setattr(sync_rules, "session_cwd", lambda explicit=None: project)
+    out = _plugin._handle_slash("sync --target=zcode")
+    assert "context-rules sync [zcode]:" in out
+    assert (project / ".zcode" / "rules" / "py.md").exists()
+    # a bare unknown token is a usage error too
+    out2 = _plugin._handle_slash("sync now")
+    assert "usage" in out2.lower()
