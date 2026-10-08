@@ -118,7 +118,7 @@ def _materialize_root(
                 if existing is None or GENERATED_MARKER not in existing[:400]:
                     reason = "unreadable (fix permissions, or delete it if it is a stale projection)" if existing is None \
                         else "handwritten — import or rename it via /context-rules sync-from-claude"
-                    skipped.append(f"{target.name} (existing .claude rule with this name is {reason})")
+                    skipped.append(f"{target.name} (existing file with this name is {reason})")
                 else:
                     target.write_text(content, encoding="utf-8")
                     updated.append(target.name)
@@ -193,11 +193,13 @@ def _write_digest(root: Path, cursor_rules: List[Rule]) -> str:
         return "digest: created"
     begin_count = existing.count(DIGEST_BEGIN)
     end_count = existing.count(DIGEST_END)
-    if (begin_count == 0) != (end_count == 0):
-        return "digest: skipped (exactly one RULE-DIGESTS marker in AGENTS.md — not auto-repaired)"
-    if begin_count == 0:
+    if begin_count == 0 and end_count == 0:
         agents.write_text(existing.rstrip("\n") + "\n\n" + block, encoding="utf-8")
         return "digest: created"
+    if begin_count != 1 or end_count != 1:
+        # one marker missing, or several pairs — any rewrite would either eat
+        # a nested block or edit an ambiguous one; never auto-repair
+        return "digest: skipped (RULE-DIGESTS markers in AGENTS.md are malformed — not auto-repaired)"
     begin_idx = existing.index(DIGEST_BEGIN) + len(DIGEST_BEGIN)
     end_idx = existing.index(DIGEST_END)
     if begin_idx > end_idx:
@@ -257,9 +259,10 @@ def _sync_target(
         if target == "zcode":
             # the digest is how the zcode agent discovers the rules, so it is
             # part of the same materialize operation (D2). It lists exactly
-            # the rules this run wrote or kept — mirroring _materialize_root's
-            # first-wins slug-collision policy, so a skipped rule gets no line
-            held = set(created) | set(updated) | set(kept)
+            # the rules this run wrote or kept in THIS root — mirroring
+            # _materialize_root's first-wins slug-collision policy, so a
+            # skipped rule gets no line
+            held = set(c) | set(u) | set(k)
             seen: Set[str] = set()
             digest_rules: List[Rule] = []
             for rule in (x for x in cursor_rules if x.root == root):

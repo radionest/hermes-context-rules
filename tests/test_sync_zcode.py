@@ -341,3 +341,43 @@ def test_zcode_duplicate_prune_keeps_only_when_managed_written(tmp_path):
     assert (project / ".zcode" / "rules" / "style.md").exists()  # kept: canon's only projection
     assert (project / ".zcode" / "rules" / "python-style.md").read_text() == "Handwritten note.\n"
     assert "skipped" in out
+
+
+def test_multi_root_digest_lists_only_rules_held_in_that_root(tmp_path):
+    """The digest must reflect the CURRENT root's materialized rules, not the
+    cumulative run: an outer root whose same-name projection slot is occupied
+    by a handwritten file gets no digest line for it."""
+    outer = make_project(tmp_path)  # git root, has .cursor/rules/py.mdc
+    inner = outer / "pkg"  # nested rule root of the SAME repo
+    (inner / ".cursor" / "rules").mkdir(parents=True)
+    mdc(inner, "py", 'globs: ["**/*.py"]', "Inner body.")
+    mdc(outer, "py", 'globs: ["**/*.ts"]', "Outer body.")
+    # outer root's managed slot for py.md is handwritten-occupied
+    (outer / ".zcode" / "rules").mkdir(parents=True)
+    (outer / ".zcode" / "rules" / "py.md").write_text("Handwritten outer note.\n")
+    out = sync_rules.sync(str(inner), target="zcode")
+    # both roots are in the run (chain pkg -> git root), py.md is created in
+    # pkg but handwritten-skipped in outer — the outer digest must not list it
+    assert (inner / ".zcode" / "rules" / "py.md").exists()
+    inner_lines = digest_lines_of(agents(inner).read_text())
+    assert inner_lines == ["- **py** — Apply when working with files matching: **/*.py."]
+    outer_lines = digest_lines_of(agents(outer).read_text())
+    assert outer_lines == []  # handwritten-occupied: no line for py in the outer digest
+    assert (outer / ".zcode" / "rules" / "py.md").read_text() == "Handwritten outer note.\n"
+
+
+def test_double_marker_pairs_are_skipped_not_merged(tmp_path):
+    """Two BEGIN/END pairs: rewriting the first would eat the second block;
+    the honest action is skip, like a single orphan marker."""
+    project = make_project(tmp_path)
+    three_canon_rules(project)
+    agents(project).write_text(
+        "# Notes\n\n"
+        "<!-- BEGIN:RULE-DIGESTS -->\nfirst\n<!-- END:RULE-DIGESTS -->\n\n"
+        "<!-- BEGIN:RULE-DIGESTS -->\nsecond\n<!-- END:RULE-DIGESTS -->\n"
+    )
+    before = agents(project).read_bytes()
+    out = sync_rules.sync(str(project), target="zcode")
+    assert agents(project).read_bytes() == before
+    assert "digest: skipped" in out
+    assert "malformed" in out
