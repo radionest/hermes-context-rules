@@ -242,6 +242,7 @@ def _sync_target(
     removed: List[str] = []
     kept: List[str] = []
     skipped: List[str] = []
+    digest_lines: List[str] = []
     for root in roots:
         if target == "zcode":
             target_dir = zcode_rules_dir(root)
@@ -253,11 +254,28 @@ def _sync_target(
         removed.extend(r)
         kept.extend(k)
         skipped.extend(s)
+        if target == "zcode":
+            # the digest is how the zcode agent discovers the rules, so it is
+            # part of the same materialize operation (D2). It lists exactly
+            # the rules this run wrote or kept — mirroring _materialize_root's
+            # first-wins slug-collision policy, so a skipped rule gets no line
+            held = set(created) | set(updated) | set(kept)
+            seen: Set[str] = set()
+            digest_rules: List[Rule] = []
+            for rule in (x for x in cursor_rules if x.root == root):
+                fname = f"{_name_to_filename(rule.name)}.md"
+                if fname in seen:
+                    continue
+                seen.add(fname)
+                if fname in held:
+                    digest_rules.append(rule)
+            digest_lines.append(_write_digest(root, digest_rules))
 
     label = "claude (default)" if target == "claude" else target
     lines = [
         f"context-rules sync [{label}]: roots={len(roots)} cursor-rules={len(cursor_rules)}"
     ]
+    lines.extend(f"  {d}" for d in digest_lines if d)
     for label_, items in (("created", created), ("updated", updated), ("removed", removed), ("unchanged", kept)):
         if items:
             lines.append(f"  {label_}: {', '.join(items)}")
