@@ -197,7 +197,14 @@ _HELP = """/context-rules — conditional project rules (.cursor/rules, .claude/
   status            rules found for the current session cwd, by mode
   list              rule names only
   show <name>       full text of one rule
-  sync              regenerate .claude/rules/*.md from .cursor/rules/*.mdc (Claude Code compat)
+  sync [--target claude|zcode|all]
+                    regenerate flat projections from .cursor/rules/*.mdc.
+                    Default claude: .claude/rules/*.md only (pre-change behavior).
+                    zcode: .zcode/rules/*.md plus a digest block in the workspace
+                    AGENTS.md between <!-- BEGIN:RULE-DIGESTS --> and
+                    <!-- END:RULE-DIGESTS --> (one "- **name** — summary" line per
+                    rule; only lines between the markers are ever rewritten).
+                    all: both targets, reports separated per target.
   sync-from-claude  import handwritten .claude/rules/*.md into .cursor/rules/*.mdc (propose/apply)
   verify            run enforce gates now over files changed this turn
 """
@@ -258,5 +265,5 @@ def register(ctx) -> None:
         logger.debug("system prompt section unavailable", exc_info=True)
     ctx.register_command(
         "context-rules", handler=_handle_slash,
-        description="Conditional project rules (.cursor/rules, .claude/rules): status, show, sync, sync-from-claude, verify.",
+        description="Conditional project rules (.cursor/rules, .claude/rules, .zcode/rules): status, show, sync [--target claude|zcode|all], sync-from-claude, verify.",
     )
