@@ -71,12 +71,62 @@ rule is never counted twice. Handwritten (unmarked) `.claude/rules/*.md`
 files are never overwritten by sync — name collisions between the two
 sources coexist as distinct rules.
 
+## Sync targets
+
+The canon is `.cursor/rules/*.mdc`; sync materializes it into consumer
+locations:
+
+| Target | Writes | Notes |
+|---|---|---|
+| `claude` (default) | `.claude/rules/<name>.md` | Claude Code compat, as above |
+| `zcode` | `.zcode/rules/<name>.md` **plus** a digest block in the workspace `AGENTS.md` | For the zcode client, which has no auto-load of `.zcode/rules/` |
+| `all` | both of the above | Claude target first, then zcode; the report has one labeled section per target |
+
+```
+/context-rules sync --target zcode
+/context-rules sync --target all
+```
+
+No flag means `claude` — exactly the pre-change behavior: nothing is ever
+written to `.zcode/` or `AGENTS.md` without the explicit flag.
+
+The zcode digest block sits between `<!-- BEGIN:RULE-DIGESTS -->` and
+`<!-- END:RULE-DIGESTS -->` markers in `<root>/AGENTS.md` — one
+`- **<name>** — <summary>` line per rule (the `description` frontmatter when
+present, otherwise a mode/glob apply-note), sorted by rule name. Sync
+rewrites **only the lines strictly between the markers**; every other byte of
+AGENTS.md is yours. Missing AGENTS.md is created with a `# Project rules`
+heading plus the block; zero rules leaves the markers with the lines cleared;
+a malformed block (exactly one marker) is reported as skipped and never
+auto-repaired.
+
+Invariants, identical for both targets:
+
+- `.cursor/rules/*.mdc` stays the single source of truth; edit the `.mdc`,
+  never the projection.
+- Generated projections carry the same generated-marker header for both
+  targets and are skipped when rules are read.
+- `.zcode/rules/` is **never a rule source** for this plugin — discovery
+  reads only `.cursor/rules` and `.claude/rules`.
+- Handwritten (unmarked) files in `.claude/rules/` or `.zcode/rules/` are
+  never overwritten or removed; a name collision is reported as skipped.
+- A generated projection whose canon `.mdc` is deleted is pruned on the next
+  sync (and its digest line dropped).
+
+Commit or ignore advice: `.zcode/rules/` and the AGENTS.md digest block are
+deterministic outputs of the canon — commit them (like `.claude/rules/`) so
+teammates and CI see the same projections, or add `.zcode/` to `.gitignore`
+and let each workspace regenerate on demand. Do not hand-edit between the
+digest markers.
+
 ## Commands
 
 - `/context-rules status` — rules found for the session cwd, by mode
 - `/context-rules list` — names only
 - `/context-rules show <name>` — full text of one rule
-- `/context-rules sync` — regenerate `.claude/rules/*.md`
+- `/context-rules sync [--target claude|zcode|all]` — regenerate flat
+  projections from the canon (default `claude`: `.claude/rules/*.md` only;
+  `zcode`/`all` also write `.zcode/rules/*.md` + the AGENTS.md digest block)
 - `/context-rules sync-from-claude` — import handwritten `.claude/rules/*.md`
   into `.cursor/rules/*.mdc` (the canon). Two phases: bare `sync-from-claude`
   is a read-only plan (`ready` / `ask` / `conflict` / `imported` per rule);
