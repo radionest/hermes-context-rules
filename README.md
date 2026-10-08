@@ -103,8 +103,9 @@ lines strictly between the markers**; every other byte of AGENTS.md is yours.
 Missing AGENTS.md is created with a `# Project rules` heading plus the block;
 a marker-free existing AGENTS.md gets the bare block appended, nothing
 rewritten; zero rules leaves the markers with the lines cleared; a malformed
-block (a missing or doubled marker) is reported as skipped and
-never auto-repaired.
+block (a missing, doubled, or out-of-order pair of markers) is reported as
+skipped and never auto-repaired; the same applies when AGENTS.md exists but
+cannot be read or written (permissions/encoding) — it is left untouched.
 
 Invariants, identical for both targets:
 

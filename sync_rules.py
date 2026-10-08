@@ -176,8 +176,9 @@ def _write_digest(root: Path, cursor_rules: List[Rule]) -> str:
     """Regenerate the zcode digest block in ``<root>/AGENTS.md``.
 
     Only the lines strictly between the markers are ever rewritten; the rest
-    of the file is byte-identical. A malformed marker layout (a missing or
-    doubled marker) and an unreadable AGENTS.md are never auto-repaired.
+    of the file is byte-identical. A malformed marker layout (a missing,
+    doubled, or out-of-order marker) and an unreadable AGENTS.md are never
+    auto-repaired.
     Returns a report line ('digest: created', 'updated', 'cleared',
     'unchanged' or 'digest: skipped (...)').
     """
