@@ -163,7 +163,22 @@ def _handle_slash(raw_args: str) -> Optional[str]:
         if sub == "show" and len(argv) >= 2:
             return _cmd_show(" ".join(argv[1:]))
         if sub == "sync":
-            return sync_rules.sync()
+            # parse/validate --target before anything materializes; any bare
+            # token that is not --target/--target= is a usage error
+            target = "claude"
+            i = 1
+            while i < len(argv):
+                if argv[i] == "--target" and i + 1 < len(argv):
+                    target = argv[i + 1]
+                    i += 2
+                elif argv[i].startswith("--target="):
+                    target = argv[i].split("=", 1)[1]
+                    i += 1
+                else:
+                    return "usage: /context-rules sync [--target claude|zcode|all]"
+            if target not in sync_rules._TARGETS:
+                return "usage: /context-rules sync [--target claude|zcode|all]"
+            return sync_rules.sync(target=target)
         if sub == "sync-from-claude":
             # pass the raw remainder through: re-joining split() tokens
             # would collapse whitespace runs inside quoted rule names
@@ -182,7 +197,14 @@ _HELP = """/context-rules — conditional project rules (.cursor/rules, .claude/
   status            rules found for the current session cwd, by mode
   list              rule names only
   show <name>       full text of one rule
-  sync              regenerate .claude/rules/*.md from .cursor/rules/*.mdc (Claude Code compat)
+  sync [--target claude|zcode|all]
+                    regenerate flat projections from .cursor/rules/*.mdc.
+                    Default claude: .claude/rules/*.md only (pre-change behavior).
+                    zcode: .zcode/rules/*.md plus a digest block in the workspace
+                    AGENTS.md between <!-- BEGIN:RULE-DIGESTS --> and
+                    <!-- END:RULE-DIGESTS --> (one "- **name** — summary" line per
+                    rule; only lines between the markers are ever rewritten).
+                    all: both targets, reports separated per target.
   sync-from-claude  import handwritten .claude/rules/*.md into .cursor/rules/*.mdc (propose/apply)
   verify            run enforce gates now over files changed this turn
 """
@@ -243,5 +265,5 @@ def register(ctx) -> None:
         logger.debug("system prompt section unavailable", exc_info=True)
     ctx.register_command(
         "context-rules", handler=_handle_slash,
-        description="Conditional project rules (.cursor/rules, .claude/rules): status, show, sync, sync-from-claude, verify.",
+        description="Conditional project rules (.cursor/rules, .claude/rules, .zcode/rules): status, show, sync [--target claude|zcode|all], sync-from-claude, verify.",
     )
