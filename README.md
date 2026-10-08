@@ -87,17 +87,23 @@ locations:
 /context-rules sync --target all
 ```
 
-No flag means `claude` — exactly the pre-change behavior: nothing is ever
-written to `.zcode/` or `AGENTS.md` without the explicit flag.
+No flag means `claude` — the pre-change target: nothing is ever written to
+`.zcode/` or `AGENTS.md` without the explicit flag. (One caveat carried over
+from the base branch: since the sync-from-claude change, sync materializes
+*every* cursor rule mode — always/manual included — not only glob/desc as in
+v0.1.0; the no-flag report reflects that.)
 
 The zcode digest block sits between `<!-- BEGIN:RULE-DIGESTS -->` and
 `<!-- END:RULE-DIGESTS -->` markers in `<root>/AGENTS.md` — one
-`- **<name>** — <summary>` line per rule (the `description` frontmatter when
-present, otherwise a mode/glob apply-note), sorted by rule name. Sync
-rewrites **only the lines strictly between the markers**; every other byte of
-AGENTS.md is yours. Missing AGENTS.md is created with a `# Project rules`
-heading plus the block; zero rules leaves the markers with the lines cleared;
-a malformed block (a missing or doubled marker) is reported as skipped and
+`- **<name>** — <summary>` line per *projected* rule (the `description`
+frontmatter when present, otherwise a mode/glob apply-note), sorted by rule
+name; a rule skipped in `.zcode/rules/` (handwritten name collision, slug
+collision, unreadable target) gets no digest line. Sync rewrites **only the
+lines strictly between the markers**; every other byte of AGENTS.md is yours.
+Missing AGENTS.md is created with a `# Project rules` heading plus the block;
+a marker-free existing AGENTS.md gets the bare block appended, nothing
+rewritten; zero rules leaves the markers with the lines cleared; a malformed
+block (a missing or doubled marker) is reported as skipped and
 never auto-repaired.
 
 Invariants, identical for both targets:

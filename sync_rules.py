@@ -176,41 +176,59 @@ def _write_digest(root: Path, cursor_rules: List[Rule]) -> str:
     """Regenerate the zcode digest block in ``<root>/AGENTS.md``.
 
     Only the lines strictly between the markers are ever rewritten; the rest
-    of the file is byte-identical. A file with exactly one marker (malformed
-    block) is never auto-repaired. Returns a report line ('digest: created',
-    'updated', 'cleared', 'unchanged' or 'digest: skipped (...)').
+    of the file is byte-identical. A malformed marker layout (a missing or
+    doubled marker) and an unreadable AGENTS.md are never auto-repaired.
+    Returns a report line ('digest: created', 'updated', 'cleared',
+    'unchanged' or 'digest: skipped (...)').
     """
     rules = sorted(
         (r for r in cursor_rules if r.root == root), key=lambda r: r.name
     )
     lines = [_digest_line(r) for r in rules]
-    block = "\n".join([_AGENTS_HEADING, "", DIGEST_BEGIN, *lines, DIGEST_END, ""])
+    full_block = "\n".join([_AGENTS_HEADING, "", DIGEST_BEGIN, *lines, DIGEST_END, ""])
+    bare_block = "\n".join([DIGEST_BEGIN, *lines, DIGEST_END, ""])
     agents = root / "AGENTS.md"
+    if agents.exists():
+        try:
+            existing = agents.read_text(encoding="utf-8-sig")
+        except (OSError, UnicodeDecodeError):
+            # exists but unreadable (wrong encoding, no permissions): may be
+            # handwritten — never overwrite a file we could not read
+            return "digest: skipped (AGENTS.md exists but cannot be read — left untouched)"
+    else:
+        existing = None
     try:
-        existing = agents.read_text(encoding="utf-8-sig")
-    except (OSError, UnicodeDecodeError):
-        agents.write_text(block, encoding="utf-8")
-        return "digest: created"
-    begin_count = existing.count(DIGEST_BEGIN)
-    end_count = existing.count(DIGEST_END)
-    if begin_count == 0 and end_count == 0:
-        agents.write_text(existing.rstrip("\n") + "\n\n" + block, encoding="utf-8")
-        return "digest: created"
-    if begin_count != 1 or end_count != 1:
-        # one marker missing, or several pairs — any rewrite would either eat
-        # a nested block or edit an ambiguous one; never auto-repair
-        return "digest: skipped (RULE-DIGESTS markers in AGENTS.md are malformed — not auto-repaired)"
-    begin_idx = existing.index(DIGEST_BEGIN) + len(DIGEST_BEGIN)
-    end_idx = existing.index(DIGEST_END)
-    if begin_idx > end_idx:
-        return "digest: skipped (RULE-DIGESTS markers out of order in AGENTS.md — not auto-repaired)"
-    inner = existing[begin_idx:end_idx]
-    before, after = existing[:begin_idx], existing[end_idx:]
-    new_inner = ("\n" + "\n".join(lines) + "\n") if lines else "\n"
-    if inner == new_inner:
-        return "digest: unchanged"
-    agents.write_text(before + new_inner + after, encoding="utf-8")
-    return "digest: updated" if lines else "digest: cleared"
+        if existing is None:
+            agents.write_text(full_block, encoding="utf-8")
+            return "digest: created"
+        begin_count = existing.count(DIGEST_BEGIN)
+        end_count = existing.count(DIGEST_END)
+        if begin_count == 0 and end_count == 0:
+            # no markers yet: append the bare block after the existing bytes,
+            # separated by exactly one blank line — nothing is rewritten and
+            # no heading is injected into a handwritten file
+            sep = "" if existing.endswith("\n\n") else "\n" if existing.endswith("\n") else "\n\n"
+            agents.write_text(existing + sep + bare_block, encoding="utf-8")
+            return "digest: created"
+        if begin_count != 1 or end_count != 1:
+            # one marker missing, or several pairs — any rewrite would either
+            # eat a nested block or edit an ambiguous one; never auto-repair
+            return "digest: skipped (RULE-DIGESTS markers in AGENTS.md are malformed — not auto-repaired)"
+        begin_idx = existing.index(DIGEST_BEGIN) + len(DIGEST_BEGIN)
+        end_idx = existing.index(DIGEST_END)
+        if begin_idx > end_idx:
+            return "digest: skipped (RULE-DIGESTS markers out of order in AGENTS.md — not auto-repaired)"
+        inner = existing[begin_idx:end_idx]
+        before, after = existing[:begin_idx], existing[end_idx:]
+        new_inner = ("\n" + "\n".join(lines) + "\n") if lines else "\n"
+        if inner == new_inner:
+            return "digest: unchanged"
+        agents.write_text(before + new_inner + after, encoding="utf-8")
+        return "digest: updated" if lines else "digest: cleared"
+    except OSError as exc:
+        # the read succeeded but a write failed (permissions, read-only FS):
+        # report honestly instead of crashing mid-target
+        return f"digest: skipped (could not write AGENTS.md: {exc})"
 
 
 def sync(explicit_cwd: Optional[str] = None, target: str = "claude") -> str:

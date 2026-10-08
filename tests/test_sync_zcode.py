@@ -381,3 +381,52 @@ def test_double_marker_pairs_are_skipped_not_merged(tmp_path):
     assert agents(project).read_bytes() == before
     assert "digest: skipped" in out
     assert "malformed" in out
+
+
+def test_unreadable_agents_md_is_skipped_never_overwritten(tmp_path):
+    """An existing AGENTS.md that cannot be decoded (latin-1 handwriting,
+    UTF-16, stray invalid byte) may be handwritten — overwriting it with the
+    digest block would be data loss; skip + report like the claude target."""
+    project = make_project(tmp_path)
+    three_canon_rules(project)
+    agents(project).write_bytes(b"Handwritten latin-1: caf\xe9 na\xefve\n")
+    before = agents(project).read_bytes()
+    out = sync_rules.sync(str(project), target="zcode")
+    assert agents(project).read_bytes() == before  # byte-identical, no loss
+    assert "digest: skipped" in out
+    assert "cannot be read" in out
+
+
+def test_marker_free_agents_md_gets_bare_block_appended(tmp_path):
+    """A marker-free AGENTS.md gets the bare block appended after its own
+    bytes: no heading injected, no trailing blank lines rewritten."""
+    project = make_project(tmp_path)
+    three_canon_rules(project)
+    agents(project).write_bytes(b"# My notes\n\nprose\n\n\n\n")  # trailing blanks kept
+    out = sync_rules.sync(str(project), target="zcode")
+    text = agents(project).read_text()
+    assert text.startswith("# My notes\n\nprose\n\n\n\n")  # existing bytes untouched
+    assert "# Project rules" not in text  # no heading injected
+    digest_lines = digest_lines_of(text)
+    assert len(digest_lines) == 3
+    assert "digest: created" in out
+
+
+def test_unwritable_agents_md_reports_skip_not_crash(tmp_path, monkeypatch):
+    """A write failure (permissions, read-only FS) surfaces as a digest-skip
+    line in the report, not a PermissionError crashing mid-target."""
+    project = make_project(tmp_path)
+    three_canon_rules(project)
+    real_write_text = Path.write_text
+
+    def failing_write_text(self, data, encoding=None, errors=None, newline=None):
+        if self.name == "AGENTS.md":
+            raise PermissionError(13, "Permission denied")
+        return real_write_text(self, data, encoding=encoding, errors=errors, newline=newline)
+
+    monkeypatch.setattr(Path, "write_text", failing_write_text)
+    out = sync_rules.sync(str(project), target="zcode")
+    assert "digest: skipped" in out
+    assert "could not write" in out
+    # projections were still materialized; the report is a report, not a crash
+    assert (project / ".zcode" / "rules" / "py.md").exists()
