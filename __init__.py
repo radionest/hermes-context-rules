@@ -163,7 +163,22 @@ def _handle_slash(raw_args: str) -> Optional[str]:
         if sub == "show" and len(argv) >= 2:
             return _cmd_show(" ".join(argv[1:]))
         if sub == "sync":
-            return sync_rules.sync()
+            # parse/validate --target before anything materializes; any bare
+            # token that is not --target/--target= is a usage error
+            target = "claude"
+            i = 1
+            while i < len(argv):
+                if argv[i] == "--target" and i + 1 < len(argv):
+                    target = argv[i + 1]
+                    i += 2
+                elif argv[i].startswith("--target="):
+                    target = argv[i].split("=", 1)[1]
+                    i += 1
+                else:
+                    return "usage: /context-rules sync [--target claude|zcode|all]"
+            if target not in sync_rules._TARGETS:
+                return "usage: /context-rules sync [--target claude|zcode|all]"
+            return sync_rules.sync(target=target)
         if sub == "sync-from-claude":
             # pass the raw remainder through: re-joining split() tokens
             # would collapse whitespace runs inside quoted rule names

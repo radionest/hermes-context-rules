@@ -18,6 +18,10 @@ def claude_rules_dir(root: Path) -> Path:
     return root / ".claude" / "rules"
 
 
+def zcode_rules_dir(root: Path) -> Path:
+    return root / ".zcode" / "rules"
+
+
 def generated_files(rules_dir: Path) -> List[Path]:
     out: List[Path] = []
     if not rules_dir.is_dir():
@@ -153,14 +157,19 @@ def _materialize_root(
     return created, updated, removed, kept, skipped
 
 
-def sync(explicit_cwd: Optional[str] = None) -> str:
-    """Materialize cursor rules as flat Claude Code rules; report what happened.
+_TARGETS = ("claude", "zcode", "all")
+
+
+def sync(explicit_cwd: Optional[str] = None, target: str = "claude") -> str:
+    """Materialize cursor rules into flat projections for *target*; report.
 
     Every cursor rule mode gets a projection (always/manual included), so a
     projection written by sync-from-claude stays refreshed. A handwritten
-    (unmarked) .claude/rules file is never overwritten — name collisions
-    between the two sources coexist as distinct rules by design.
+    (unmarked) rules file is never overwritten — name collisions between the
+    two sources coexist as distinct rules by design.
     """
+    if target not in _TARGETS:
+        return "usage: /context-rules sync [--target claude|zcode|all]"
     base = session_cwd(explicit_cwd)
     roots = find_rule_roots(base)
     if not roots:
@@ -168,23 +177,39 @@ def sync(explicit_cwd: Optional[str] = None) -> str:
 
     rules = load_rules(base)
     cursor_rules = [r for r in rules if r.source == "cursor"]
+    targets = ["claude", "zcode"] if target == "all" else [target]
+    sections = [_sync_target(base, roots, cursor_rules, t) for t in targets]
+    return "\n\n".join(sections)
+
+
+def _sync_target(
+    base: Path, roots: List[Path], cursor_rules: List[Rule], target: str
+) -> str:
+    """Run one sync target over all roots and render its report section."""
     created: List[str] = []
     updated: List[str] = []
     removed: List[str] = []
     kept: List[str] = []
     skipped: List[str] = []
     for root in roots:
-        c, u, r, k, s = _materialize_root(root, cursor_rules, claude_rules_dir(root))
+        if target == "zcode":
+            target_dir = zcode_rules_dir(root)
+        else:
+            target_dir = claude_rules_dir(root)
+        c, u, r, k, s = _materialize_root(root, cursor_rules, target_dir)
         created.extend(c)
         updated.extend(u)
         removed.extend(r)
         kept.extend(k)
         skipped.extend(s)
 
-    lines = [f"context-rules sync: roots={len(roots)} cursor-rules={len(cursor_rules)}"]
-    for label, items in (("created", created), ("updated", updated), ("removed", removed), ("unchanged", kept)):
+    label = "claude (default)" if target == "claude" else target
+    lines = [
+        f"context-rules sync [{label}]: roots={len(roots)} cursor-rules={len(cursor_rules)}"
+    ]
+    for label_, items in (("created", created), ("updated", updated), ("removed", removed), ("unchanged", kept)):
         if items:
-            lines.append(f"  {label}: {', '.join(items)}")
+            lines.append(f"  {label_}: {', '.join(items)}")
     if skipped:
         lines.append("  skipped (needs attention):")
         lines.extend(f"    - {s}" for s in skipped)
