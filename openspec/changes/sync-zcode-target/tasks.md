@@ -31,7 +31,7 @@ from `fix-review-findings` @ bc0aa10. Verify per group: `uv run --with pytest py
 
 ## 6. Manual verification (implementer)
 
-- [ ] 6.1 Fixture repo in `$TMPDIR/zcode-fixture`: git init, 2–3 `.cursor/rules/*.mdc` (glob/always/desc), invoke `sync` with target all (via a small driver script or the tests' invocation pattern), confirm both targets + AGENTS.md digest materialized; second run = no-op; delete one .mdc → re-sync removes the projection and the digest line. Record observed outputs in the PR body. Files: none committed (tmp fixture). Verify: outputs pasted into PR description. Commit: none — evidence only.
+- [x] 6.1 Fixture repo in `$TMPDIR/zcode-fixture`: git init, 2–3 `.cursor/rules/*.mdc` (glob/always/desc), invoke `sync` with target all (via a small driver script or the tests' invocation pattern), confirm both targets + AGENTS.md digest materialized; second run = no-op; delete one .mdc → re-sync removes the projection and the digest line. Record observed outputs in the PR body. Files: none committed (tmp fixture). Verify: outputs pasted into PR description. Commit: none — evidence only.
 
 ## 7. Operator session (NOT the implementer)
 
